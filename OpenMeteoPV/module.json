@@ -6,8 +6,10 @@
   "aliases": [
     "PV Forecast (OpenMeteo)"
   ],
+  "url": "https://github.com/eProTec-eu/OpenMeteoPV.git",
   "parentRequirements": [],
   "childRequirements": [],
   "implemented": [],
+  "version": "1.5.0",
   "prefix": "OMPV"
 }
