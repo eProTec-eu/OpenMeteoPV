@@ -24,7 +24,13 @@ class OpenMeteoPV extends IPSModule{
     $this->RegisterVariableFloat('Tomorrow_kWh','Energie morgen [kWh]','',21);
     $this->RegisterVariableFloat('DayAfter_kWh','Energie übermorgen [kWh]','',22);
     $this->RegisterVariableString('ForecastJSON','Forecast JSON (gesamt)','',90);
-    $this->RegisterTimer('MeteoPV_Update',0,'MeteoPV_Update($_IPS["TARGET"]);');
+    
+    $this->RegisterTimer(
+        'OMPV_Update',
+        0,
+        'IPS_RequestAction($_IPS["TARGET"], "Update", null);'
+    );
+
   }
   public function ApplyChanges(){parent::ApplyChanges();
     $arr=$this->getArrays(); $pos=30; $i=0;
@@ -34,8 +40,10 @@ class OpenMeteoPV extends IPSModule{
       $this->RegisterVariableString($ident.'_ForecastJSON',"Forecast JSON {$a['Name']}",'', $pos++);
       $this->RegisterVariableString($ident.'_HorizonJSON',"Horizon JSON {$a['Name']}",'', $pos++);
       $i++; }
-    $min=max(10,(int)$this->ReadPropertyInteger('UpdateMinutes'));
-    $this->SetTimerInterval('MeteoPV_Update',$min*60*1000);
+
+    $min = max(10, (int)$this->ReadPropertyInteger('UpdateMinutes'));
+    $this->SetTimerInterval('OMPV_Update', $min * 60 * 1000);
+
     $this->Update();
   }
   public function GetConfigurationForm(){
@@ -61,9 +69,16 @@ class OpenMeteoPV extends IPSModule{
         ['type'=>'ValidationTextBox','name'=>'Arrays','caption'=>'JSON','value'=>$arraysJson]
       ],
       'actions'=>[
-        ['type'=>'Button','caption'=>'Jetzt aktualisieren','onClick'=>'MeteoPV_Update($id);']
+        ['type' => 'Button', 'caption' => 'Jetzt aktualisieren', 'onClick' => 'IPS_RequestAction($id, "Update", null);']
       ]
     ]);
+  }
+  public function RequestAction($Ident, $Value) {
+    if ($Ident === 'Update') {
+        $this->Update();
+        return true;
+    }
+    throw new Exception("Invalid Ident: $Ident");
   }
   public function Update(){try{$raw=$this->fetchOpenMeteo();if(!$raw){$this->SendDebug('Update','Keine Daten',0);return;} $r=$this->computePV($raw);
     $this->SetValue('TotalPower_W',(int)round($r['total_power_now_w']));
