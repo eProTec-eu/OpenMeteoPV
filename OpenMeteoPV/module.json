@@ -2,7 +2,7 @@
   "id": "{2E3D8D62-33C1-4F51-A6B1-34F1C4A6B1E8}",
   "name": "OpenMeteoPV",
   "type": 3,
-  "vendor": "Open-Meteo",
+  "vendor": "eprotec",
   "aliases": [
     "PV Forecast (OpenMeteo)"
   ],
