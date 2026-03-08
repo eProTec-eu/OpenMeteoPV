@@ -2,7 +2,7 @@
   "id": "{F5B6D36A-2A88-41AE-9F72-5F9F6E3F7A10}",
   "author": "Matthias Fenske",
   "name": "OpenMeteoPV",
-  "url": "https://example.com/OpenMeteoPV",
+  "url": "https://github.com/eProTec-eu/OpenMeteoPV.git",
   "compatibility": {
     "version": "6.0"
   },
