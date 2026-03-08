@@ -74,80 +74,31 @@ class OpenMeteoPV extends IPSModule
         $this->Update();
     }
 
-    public function GetConfigurationForm() {
-        // Aktuelle Arrays-Struktur aus der Property lesen und als schön formatiertes JSON anbieten
+    public function GetConfigurationForm(){
+        // Fallback-Form mit nur Basis-Controls und einer einzeiligen JSON-Zeile (ValidationTextBox)
         $arraysJson = $this->ReadPropertyString('Arrays');
-        if ($arraysJson === '' || $arraysJson === null) {
-            $arraysJson = json_encode([
-                [
-                    'Name' => 'Sued',
-                    'kWp' => 7.0,
-                    'Tilt' => 30.0,
-                    'Azimuth' => 0.0,           // 0° = Süden, -90°=Ost, +90°=West, ±180°=Nord
-                    'LossFactor' => 0.90,
-                    'Gamma' => -0.0040,
-                    'NOCT' => 45.0,
-                    'InverterLimit_kW' => 6.0,
-                    'HorizonMask' => [
-                        ['az' => -60, 'el' => 5],
-                        ['az' =>   0, 'el' => 8],
-                        ['az' =>  60, 'el' => 6]
-                    ],
-                    'DiffuseObstruction' => 1.00
-                ]
-            ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-        } else {
-            // Schön formatieren, falls der Benutzer es zuvor komprimiert gespeichert hat
-            $decoded = json_decode($arraysJson, true);
-            if (is_array($decoded)) {
-                $arraysJson = json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-            }
-        }
-
+        if ($arraysJson==='') $arraysJson='[]';
         return json_encode([
-            'elements' => [
-                ['type' => 'NumberSpinner', 'name' => 'Latitude',  'caption' => 'Breite (°)'],
-                ['type' => 'NumberSpinner', 'name' => 'Longitude', 'caption' => 'Länge (°)'],
-                [
-                    'type' => 'Select',
-                    'name' => 'Timezone',
-                    'caption' => 'Zeitzone',
-                    'options' => [
-                        ['caption' => 'Auto', 'value' => 'auto'],
-                        ['caption' => date_default_timezone_get(), 'value' => date_default_timezone_get()]
-                    ]
-                ],
-                ['type' => 'CheckBox', 'name' => 'UseSatellite', 'caption' => 'Satellite Radiation API (EU, 10-min)'],
-                ['type' => 'CheckBox', 'name' => 'UseGTI', 'caption' => 'GTI direkt (je String)'],
-                ['type' => 'NumberSpinner', 'name' => 'ResolutionMinutes', 'caption' => 'Auflösung (min; 10/15/60)'],
-                ['type' => 'NumberSpinner', 'name' => 'ForecastDays', 'caption' => 'Prognose-Tage (1..16)'],
-                ['type' => 'NumberSpinner', 'name' => 'PastDays', 'caption' => 'Vergangenheits-Tage (0..7)'],
-                ['type' => 'NumberSpinner', 'name' => 'UpdateMinutes', 'caption' => 'Update-Intervall (min)'],
-                ['type' => 'NumberSpinner', 'name' => 'Albedo', 'caption' => 'Albedo (0..1)', 'digits' => 2, 'minimum' => 0, 'maximum' => 1],
-
-                // >>> HIER: JSON-Textfeld statt ListEditor <<<
-                [
-                    'type'    => 'Label',
-                    'caption' => 'Strings / Ausrichtungen (JSON):'
-                ],
-                [
-                    'type'    => 'TextBox',
-                    'name'    => 'Arrays',        // nutzt dieselbe Property "Arrays"
-                    'caption' => '',
-                    'multiline' => true,
-                    'height' => 240,
-                    'width'  => '600px',
-                    'value'  => $arraysJson
-                ],
-                [
-                    'type'    => 'Label',
-                    'caption' => 'Felder pro Eintrag: Name, kWp, Tilt, Azimuth, LossFactor, Gamma, NOCT, InverterLimit_kW, HorizonMask[], DiffuseObstruction'
-                ]
-            ],
-            'actions' => [
-                ['type' => 'Button', 'caption' => 'Jetzt aktualisieren', 'onClick' => 'OMPV_Update($id);'],
-                // Optionales Validieren (siehe 3))
-            ]
+        'elements'=>[
+            ['type'=>'NumberSpinner','name'=>'Latitude','caption'=>'Breite (°)'],
+            ['type'=>'NumberSpinner','name'=>'Longitude','caption'=>'Länge (°)'],
+            ['type'=>'Select','name'=>'Timezone','caption'=>'Zeitzone','options'=>[
+            ['caption'=>'Auto','value'=>'auto'],
+            ['caption'=>date_default_timezone_get(),'value'=>date_default_timezone_get()]
+            ]],
+            ['type'=>'CheckBox','name'=>'UseSatellite','caption'=>'Satellite Radiation API (EU, 10-min)'],
+            ['type'=>'CheckBox','name'=>'UseGTI','caption'=>'GTI direkt (je String)'],
+            ['type'=>'NumberSpinner','name'=>'ResolutionMinutes','caption'=>'Auflösung (min; 10/15/60)'],
+            ['type'=>'NumberSpinner','name'=>'ForecastDays','caption'=>'Prognose-Tage (1..16)'],
+            ['type'=>'NumberSpinner','name'=>'PastDays','caption'=>'Vergangenheits-Tage (0..7)'],
+            ['type'=>'NumberSpinner','name'=>'UpdateMinutes','caption'=>'Update-Intervall (min)'],
+            ['type'=>'NumberSpinner','name'=>'Albedo','caption'=>'Albedo (0..1)','digits'=>2,'minimum'=>0,'maximum'=>1],
+            ['type'=>'Label','caption'=>'Strings/Ausrichtungen als JSON (eine Zeile):'],
+            ['type'=>'ValidationTextBox','name'=>'Arrays','caption'=>'JSON','value'=>$arraysJson]
+        ],
+        'actions'=>[
+            ['type'=>'Button','caption'=>'Jetzt aktualisieren','onClick'=>'OMPV_Update($id);']
+        ]
         ]);
     }
 
