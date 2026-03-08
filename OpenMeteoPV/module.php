@@ -112,5 +112,12 @@ class OpenMeteoPV extends IPSModule{
   private function cosIncidence(float $tilt,float $aziM,float $zenith,float $aziSun): float { $nx=sin($tilt)*cos($aziM); $ny=sin($tilt)*sin($aziM); $nz=cos($tilt); $sx=sin($zenith)*cos($aziSun); $sy=sin($zenith)*sin($aziSun); $sz=cos($zenith); return $nx*$sx+$ny*$sy+$nz*$sz; }
   private function solarPosApprox(int $ts,float $lat,float $lon): array { $d=($ts-946684800)/86400.0; $L=deg2rad(fmod(280.46+0.9856474*$d,360.0)); $g=deg2rad(fmod(357.528+0.9856003*$d,360.0)); $lambda=$L+deg2rad(1.915)*sin($g)+deg2rad(0.020)*sin(2*$g); $epsilon=deg2rad(23.439-0.0000004*$d); $RA=atan2(cos($epsilon)*sin($lambda),cos($lambda)); $dec=asin(sin($epsilon)*sin($lambda)); $GMST=fmod(18.697374558+24.06570982441908*$d,24.0); $LST=deg2rad(($GMST*15.0))+$lon; $HA=$LST-$RA; $x=cos($HA)*cos($dec); $y=sin($HA)*cos($dec); $z=sin($dec); $xhor=$x*sin($lat)-$z*cos($lat); $yhor=$y; $zhor=$x*cos($lat)+$z*sin($lat); $azimuth=atan2($yhor,$xhor)+M_PI; $zenith=acos($zhor); return ['zenith'=>$zenith,'azimuth'=>$azimuth]; }
 }
-function MeteoPV_Update(int $InstanceID){ $inst=IPS_GetInstance($InstanceID); if(!isset($inst['ModuleInfo']['ModuleID'])||$inst['ModuleInfo']['ModuleID']!=='{2E3D8D62-33C1-4F51-A6B1-34F1C4A6B1E8}') return; IPS_RunScriptText("IPS_RequestAction($InstanceID, 'Update', null);"); }
+function MeteoPV_Update(int $InstanceID) {
+    $inst = IPS_GetInstance($InstanceID);
+    if (!isset($inst['ModuleInfo']['ModuleID']) || $inst['ModuleInfo']['ModuleID'] !== '{2E3D8D62-33C1-4F51-A6B1-34F1C4A6B1E8}') return;
+    /** @var OpenMeteoPV $obj */
+    $obj = IPS_GetObject($InstanceID);
+    // In Modulen wäre normalerweise RequestAction zu nutzen; hier rufen wir Update direkt.
+    IPS_RunScriptText("IPS_RequestAction($InstanceID, 'Update', null);");
+}
 ?>
