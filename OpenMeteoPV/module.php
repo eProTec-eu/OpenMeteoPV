@@ -55,7 +55,7 @@ class OpenMeteoPV extends IPSModule
         $this->RegisterTimer(
             'OMPV_Update',
             0,
-            'IPS_RequestAction($_IPS["TARGET"], "Update", null);'
+            'IPS_RequestAction($_IPS["TARGET"], "Update", 0);'
         );
     }
 
@@ -120,7 +120,7 @@ class OpenMeteoPV extends IPSModule
                 ['type' => 'ValidationTextBox', 'name' => 'Arrays', 'caption' => 'JSON', 'value' => $arraysJson],
             ],
             'actions' => [
-                ['type' => 'Button', 'caption' => 'Jetzt aktualisieren', 'onClick' => 'IPS_RequestAction($id, "Update", null);']
+                ['type' => 'Button', 'caption' => 'Jetzt aktualisieren', 'onClick' => 'IPS_RequestAction($id, "Update", 0);']
             ]
         ]);
     }
