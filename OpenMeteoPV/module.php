@@ -49,7 +49,7 @@ class OpenMeteoPV extends IPSModule
         $this->RegisterVariableString('ForecastJSON', 'Forecast JSON (gesamt)', '', 90);
 
         // Timer für zyklische Updates
-        $this->RegisterTimer('OM-PV_Update', 0, 'OM-PV_Update($_IPS["TARGET"]);');
+        $this->RegisterTimer('MeteoPV_Update', 0, 'MeteoPV_Update($_IPS["TARGET"]);');
     }
 
     public function ApplyChanges() {
@@ -68,7 +68,7 @@ class OpenMeteoPV extends IPSModule
 
         // Timer setzen
         $minutes = max(10, (int)$this->ReadPropertyInteger('UpdateMinutes'));
-        $this->SetTimerInterval('OM-PV_Update', $minutes * 60 * 1000);
+        $this->SetTimerInterval('MeteoPV_Update', $minutes * 60 * 1000);
 
         // initiales Update
         $this->Update();
@@ -112,7 +112,7 @@ class OpenMeteoPV extends IPSModule
                 ]
             ],
             'actions' => [
-                ['type' => 'Button', 'caption' => 'Jetzt aktualisieren', 'onClick' => 'OM-PV_Update($id);']
+                ['type' => 'Button', 'caption' => 'Jetzt aktualisieren', 'onClick' => 'MeteoPV_Update($id);']
             ]
         ]);
     }
@@ -418,7 +418,7 @@ class OpenMeteoPV extends IPSModule
     }
 }
 
-function OM-PV_Update(int $InstanceID) {
+function MeteoPV_Update(int $InstanceID) {
     $inst = IPS_GetInstance($InstanceID);
     if (!isset($inst['ModuleInfo']['ModuleID']) || $inst['ModuleInfo']['ModuleID'] !== '{2E3D8D62-33C1-4F51-A6B1-34F1C4A6B1E8}') return;
     /** @var OpenMeteoPV $obj */
