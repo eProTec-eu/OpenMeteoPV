@@ -309,6 +309,8 @@ class OpenMeteoPV extends IPSModule
             }
         }
 
+        $this->SendDebug("Interp", "15-min points: ".count($times15), 0);
+
         // Intervalllänge (h) aus Zeitstempel-Abstand bestimmen (robust gegen spätere Änderungen)
         $interval_hours = 0.25; // Default 15-min
         if (count($times15) >= 2) {
