@@ -405,6 +405,22 @@ class OpenMeteoPV extends IPSModule
                     }
                 }
 
+                // --- Diagnose ---
+                if ($i === $nowIdx) {
+                    $this->SendDebug('DUMP',
+                        sprintf(
+                            't=%s | cosZ=%.3f | DNI(W)=%.1f | DIR_HOR(W)=%.1f | cosT=%.3f | POA_W=%.1f',
+                            $times[$i],
+                            cos($zen),
+                            $dniN_now_W,
+                            $dirHor_W[$i],
+                            $cosT,
+                            isset($poa_W) ? $poa_W : -1
+                        ),
+                        0
+                    );
+                }
+
                 // POA-Leistung (W/m²) und -Energie (Wh/m²)
                 $poa_W  = ($dni_eff_W  * $cosT)
                         + ($dhi_eff_W  * (1 + cos($tilt)) / 2)
