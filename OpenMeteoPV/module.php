@@ -250,253 +250,229 @@ class OpenMeteoPV extends IPSModule
 
     private function computePV(array $raw): array
     {
-        // --- Properties / Inputs ---
         $arrays = $this->getArrays();
         $albedo = (float)$this->ReadPropertyFloat('Albedo');
 
-        // --- Open-Meteo hourly (Energie der vergangenen Stunde in Wh/m²) ---
-        $times = $raw['hourly']['time']                     ?? [];
-        $ghi   = $raw['hourly']['shortwave_radiation']      ?? []; // Wh/m²/h (Energie/h)
-        $dni   = $raw['hourly']['direct_normal_irradiance'] ?? []; // Wh/m²/h
-        $dhi   = $raw['hourly']['diffuse_radiation']        ?? []; // Wh/m²/h
-        $t2m   = $raw['hourly']['temperature_2m']           ?? []; // °C
+        // ---- OPEN-METEO HOURLY (Forecast) → W/m² (NICHT Wh/m²!) ----
+        $times_h = $raw['hourly']['time'] ?? [];
+        $ghi_h   = $raw['hourly']['shortwave_radiation'] ?? [];
+        $dni_h   = $raw['hourly']['direct_radiation'] ?? [];
+        $dhi_h   = $raw['hourly']['diffuse_radiation'] ?? [];
+        $t2m_h   = $raw['hourly']['temperature_2m'] ?? [];
 
-        $n_hourly = min(count($times), count($ghi), count($dni), count($dhi), count($t2m));
-        if ($n_hourly === 0) {
+        $nh = min(count($times_h), count($ghi_h), count($dni_h), count($dhi_h), count($t2m_h));
+        if ($nh === 0) {
             return [
                 'total_power_now_w' => 0,
-                'daily'     => [],
-                'strings'   => [],
-                'json_total'=> []
+                'daily' => [],
+                'strings' => [],
+                'json_total' => []
             ];
         }
 
-        /* -------------------------------------------------------------
-        * 15-Minuten-Interpolation (Energie-erhaltend)
-        * OM hourly = Wh/m² der letzten Stunde → wir teilen jede Stunde
-        * auf 4 Teilintervalle à 15 Minuten, JEDES mit 1/4 der Stundenenergie.
-        * Temperatur (t2m) interpolieren wir linear.
-        * ------------------------------------------------------------- */
-        $stepCount = 4;                 // 4 Werte pro Stunde
-        $stepSec   = 15 * 60;           // 15 Minuten
-        $times15 = []; $ghi15 = []; $dni15 = []; $dhi15 = []; $t2m15 = [];
+        // ---- 15-min Interpolation (energie-erhaltend für 15-min, aber Forecast liefert W/m²!) ----
+        // Forecast hourly = W/m² momentane Leistung → Energie = W * 0.25h
+        $stepSec = 15 * 60;
+        $stepHours = 0.25;
 
-        for ($i = 0; $i < $n_hourly; $i++) {
-            $t0 = strtotime($times[$i]);
-            $t1 = ($i < $n_hourly-1) ? strtotime($times[$i+1]) : ($t0 + 3600);
+        $times = [];
+        $ghi   = [];
+        $dni   = [];
+        $dhi   = [];
+        $t2m   = [];
 
-            // Energie der Stunde auf vier 15-min Portionen verteilen
-            $ghi_q = $ghi[$i] / $stepCount;
-            $dni_q = $dni[$i] / $stepCount;
-            $dhi_q = $dhi[$i] / $stepCount;
+        for ($i = 0; $i < $nh; $i++) {
 
-            for ($k = 0; $k < $stepCount; $k++) {
+            $t0 = strtotime($times_h[$i]);
+            $t1 = ($i < $nh - 1) ? strtotime($times_h[$i+1]) : ($t0 + 3600);
+
+            for ($k = 0; $k < 4; $k++) {
                 $tk = $t0 + $k * $stepSec;
-                $times15[] = date('c', $tk);
+                if ($tk > $t1) $tk = $t1;
 
-                // Energie pro 15-min-Intervall
-                $ghi15[] = $ghi_q;
-                $dni15[] = $dni_q;
-                $dhi15[] = $dhi_q;
+                $times[] = date('c', $tk);
 
-                // Temperatur linear zwischen stündlichen Werten
-                if ($i < $n_hourly - 1) {
+                // Forecast W/m² → 15-min Energie Wh/m²
+                $ghi[] = ($ghi_h[$i] ?? 0) * $stepHours;
+                $dni[] = ($dni_h[$i] ?? 0) * $stepHours;
+                $dhi[] = ($dhi_h[$i] ?? 0) * $stepHours;
+
+                // Temperatur lineare Interpolation
+                if ($i < $nh - 1) {
                     $alpha = ($tk - $t0) / max(1, ($t1 - $t0));
-                    $t2m15[] = $t2m[$i] + $alpha * ($t2m[$i+1] - $t2m[$i]);
+                    $t2m[] = $t2m_h[$i] + $alpha * ($t2m_h[$i+1] - $t2m_h[$i]);
                 } else {
-                    $t2m15[] = $t2m[$i];
+                    $t2m[] = $t2m_h[$i]; 
                 }
             }
         }
 
-        $this->SendDebug("Interp", "15-min points: ".count($times15), 0);
-
-        // Intervalllänge (h) aus Zeitstempel-Abstand bestimmen (robust gegen spätere Änderungen)
-        $interval_hours = 0.25; // Default 15-min
-        if (count($times15) >= 2) {
-            $dt = abs(strtotime($times15[1]) - strtotime($times15[0]));
-            if ($dt > 0) $interval_hours = $dt / 3600.0;
-        }
-
-        // --- Sonnenpositionen für alle 15-min Punkte vorberechnen ---
-        $n = min(count($times15), count($ghi15), count($dni15), count($dhi15), count($t2m15));
+        // Schutz, falls Forecast Lücken hat
+        $n = min(count($times), count($ghi), count($dni), count($dhi), count($t2m));
         if ($n === 0) {
             return [
                 'total_power_now_w' => 0,
-                'daily'     => [],
-                'strings'   => [],
-                'json_total'=> []
+                'daily' => [],
+                'strings' => [],
+                'json_total' => []
             ];
         }
 
+        // ---- Sonnenpositionen vorberechnen ----
         $latR = deg2rad((float)$this->ReadPropertyFloat('Latitude'));
         $lonR = deg2rad((float)$this->ReadPropertyFloat('Longitude'));
 
         $solar = [];
         for ($i = 0; $i < $n; $i++) {
-            $solar[$i] = $this->solarPosApprox(strtotime($times15[$i]), $latR, $lonR); // ['zenith','azimuth'] (rad)
+            $solar[$i] = $this->solarPosApprox(strtotime($times[$i]), $latR, $lonR);
         }
 
-        // "Jetzt"-Index neu auf 15-min Gitternetz bestimmen
-        $nowIdx = 0;
+        // ---- Jetzt-Index ----
         $now = time();
-        $bestDiff = PHP_INT_MAX;
+        $nowIdx = 0;
+        $best = PHP_INT_MAX;
         for ($i = 0; $i < $n; $i++) {
-            $tt = strtotime($times15[$i]);
-            $d  = abs($tt - $now);
-            if ($d < $bestDiff) { $bestDiff = $d; $nowIdx = $i; }
+            $d = abs(strtotime($times[$i]) - $now);
+            if ($d < $best) { $best = $d; $nowIdx = $i; }
         }
 
-        // --- Aggregationscontainer ---
+        // ---- Tages-Offset ----
+        $refDay = substr($times[0], 0, 10);
+        $refDayTs = strtotime($refDay);
+
         $total_now_w = 0.0;
-        $stringsOut  = [];
-        $json_total_map = []; // t => sum_w
-        $sumToday    = 0.0;
+        $json_total_map = [];
+        $stringsOut = [];
+
+        $sumToday = 0.0;
         $sumTomorrow = 0.0;
         $sumDayAfter = 0.0;
 
-        // Referenztag für Tages-Buckets
-        $refDayStr = substr($times15[0], 0, 10);
-        $refDayTs  = strtotime($refDayStr);
+        // ---- PRO STRING ----
+        foreach ($arrays as $idx => $arr) {
 
-        // --- Pro String rechnen ---
-        foreach ($arrays as $aIdx => $arr) {
+            // Azimut-Korrektur: Modul (0=S, +90=W, -90=E) → Sonnenframe (0=S, +90=E)
+            $az_deg_mod = (float)($arr['Azimuth'] ?? 0.0);
+            $aziM = deg2rad(-$az_deg_mod);
 
-            // Parameter
-            $tilt = deg2rad((float)($arr['Tilt']    ?? 30.0));
-            //$aziM = deg2rad((float)($arr['Azimuth'] ??  0.0));  // 0=Süd; -90=Ost; +90=West
-            
-            $az_mod_deg = (float)($arr['Azimuth'] ?? 0.0);
-            $aziM = deg2rad(-$az_mod_deg);
+            $tilt = deg2rad((float)($arr['Tilt'] ?? 30));
+            $kWp  = (float)($arr['kWp'] ?? 1.0);
+            $loss = (float)($arr['LossFactor'] ?? 0.96);
+            $gamma= (float)($arr['Gamma'] ?? -0.004);
+            $NOCT = (float)($arr['NOCT'] ?? 45);
+            $invLimit = (float)($arr['InverterLimit_kW'] ?? 0.0);
+            $mask = $this->parseHorizonMask($arr['HorizonMask'] ?? []);
+            $diffOb = isset($arr['DiffuseObstruction']) ? (float)$arr['DiffuseObstruction'] : 1.0;
 
-            $kWp  = (float)($arr['kWp']             ??  1.0);
-            $loss = (float)($arr['LossFactor']      ??  0.95);
-            $gamma= (float)($arr['Gamma']           ?? -0.0040);
-            $NOCT = (float)($arr['NOCT']            ?? 45.0);
-            $invLimitKW = (float)($arr['InverterLimit_kW'] ?? 0.0);
-
-            $mask   = $this->parseHorizonMask($arr['HorizonMask'] ?? []);
-            $diffOb = isset($arr['DiffuseObstruction']) ? max(0.0, min(1.0, (float)$arr['DiffuseObstruction'])) : 1.0;
-
-            $series_points = [];
+            $series = [];
             $now_w = 0.0;
-
-            // Tages-Buckets aus Intervall-Energie (e_kwh)
-            $dailyBuckets = []; // dayOffset => kWh
+            $daily = [];
 
             for ($i = 0; $i < $n; $i++) {
 
-                $zen = $solar[$i]['zenith'];   // rad
-                $az  = $solar[$i]['azimuth'];  // rad
+                $zen = $solar[$i]['zenith'];
+                $az  = $solar[$i]['azimuth'];
 
-                // Einfallswinkel Kosinus
+                // Einstrahlungswinkel
                 $cosT = $this->cosIncidence($tilt, $aziM, $zen, $az);
-                $cosT = max(0.0, $cosT);
+                if ($cosT < 0) $cosT = 0;
 
-                // Horizon-Maske anwenden (DNI blockieren, DHI ggf. dämpfen)
-                $elSun_deg = 90.0 - rad2deg($zen);
+                // Horizon-Maske (Achtung: Sonnen-Azimut muss negiert werden!)
+                $elSun = 90 - rad2deg($zen);
                 if (count($mask) >= 2) {
-                    $hEl = $this->horizonElevation($mask, -$az); // Grad
-                    if ($elSun_deg < $hEl) {
+                    $hEl = $this->horizonElevation($mask, -$az);
+                    if ($elSun < $hEl) {
                         $dni_eff = 0.0;
-                        $dhi_eff = $dhi15[$i] * $diffOb;
+                        $dhi_eff = $dhi[$i] * $diffOb;
                     } else {
-                        $dni_eff = $dni15[$i];
-                        $dhi_eff = $dhi15[$i];
+                        $dni_eff = $dni[$i];
+                        $dhi_eff = $dhi[$i];
                     }
                 } else {
-                    $dni_eff = $dni15[$i];
-                    $dhi_eff = $dhi15[$i];
+                    $dni_eff = $dni[$i];
+                    $dhi_eff = $dhi[$i];
                 }
 
-                // POA-Energie im 15-min Intervall (Wh/m²)
-                $poa_Whm2 = ($dni_eff * $cosT)
-                        + ($dhi_eff * (1 + cos($tilt)) / 2.0)
-                        + ($ghi15[$i] * $albedo * (1 - cos($tilt)) / 2.0);
+                // POA Energie Wh/m²
+                $poa = ($dni_eff * $cosT)
+                    + ($dhi_eff * (1 + cos($tilt)) / 2.0)
+                    + ($ghi[$i]  * $albedo * (1 - cos($tilt)) / 2.0);
 
-                // Modultemperatur (NOCT-Modell)
-                $tcell = $t2m15[$i] + ($NOCT - 20.0)/800.0 * max(0.0, $poa_Whm2);
+                if ($poa < 0) $poa = 0;
 
-                // Effektive Verluste
+                // Modultemperatur (NOCT)
+                $tcell = $t2m[$i] + ($NOCT - 20) / 800.0 * $poa;
+
+                // DC Energie (kWh) im 15-min Intervall
                 $lossEff = max(0.0, min(1.0, $loss));
+                $e_kwh = $kWp * ($poa / 1000.0) * $lossEff * (1 + $gamma * ($tcell - 25));
+                if ($e_kwh < 0) $e_kwh = 0;
 
-                $poa_Wm2 = ($dni_eff * $cosT)
-                        + ($dhi_eff * (1 + cos($tilt)) / 2.0)
-                        + ($ghi[$i] * $albedo * (1 - cos($tilt)) / 2.0);
+                // Momentanleistung
+                $inst_kW = $e_kwh / 0.25;
 
-                $poa_Whm2 = $poa_Wm2 * $interval_hours;   // 15min → 0.25
-
-                // DC-Energie im Intervall (kWh) – Achtung: poa in Wh/m² → /1000 ergibt kWh/m²
-                $e_kwh_dc = $kWp * ($poa_Whm2 / 1000.0) * $lossEff * (1.0 + $gamma * ($tcell - 25.0));
-                $e_kwh_dc = max(0.0, $e_kwh_dc);
-
-                // Momentanleistung aus Intervall-Energie
-                $inst_kW = ($interval_hours > 0) ? ($e_kwh_dc / $interval_hours) : 0.0;
-
-                // Inverter-Clipping auf Momentanleistung (kW), dann Energie neu ableiten
-                if ($invLimitKW > 0.0) {
-                    $inst_kW = min($inst_kW, $invLimitKW);
-                    $e_kwh_dc = $inst_kW * $interval_hours; // korrigierte Intervallenergie nach Clipping
+                // Clipping
+                if ($invLimit > 0) {
+                    if ($inst_kW > $invLimit) {
+                        $inst_kW = $invLimit;
+                        $e_kwh = $inst_kW * 0.25;
+                    }
                 }
 
-                $this->SendDebug('Now',
-                    sprintf('cosT=%.3f | DNI_eff=%.1f | DHI_eff=%.1f | POA_Wh=%.1f | kWp=%.1f | e15=%.3f kWh | inst=%.2f kW',
-                        $cosT, $dni_eff, $dhi_eff, $poa_Whm2, $kWp, $e_kwh_dc, $inst_kW
-                    ),
-                    0
-                );                
-
-                // "Jetzt"-Wert (W)
+                // "Jetzt"
                 if ($i === $nowIdx) {
                     $now_w += $inst_kW * 1000.0;
                 }
 
-                // Zeitreihe – p_w = Momentanleistung; e_kwh = Intervallenergie
-                $tIso = $times15[$i];
-                $p_w  = (int)round($inst_kW * 1000.0);
-                $series_points[] = ['t' => $tIso, 'p_w' => $p_w, 'e_kwh' => $e_kwh_dc];
+                // Tages-Buckets
+                $dayTs = strtotime(substr($times[$i], 0, 10));
+                $off = (int)(($dayTs - $refDayTs) / 86400);
+                if (!isset($daily[$off])) $daily[$off] = 0.0;
+                $daily[$off] += $e_kwh;
 
-                // Tagesbucket (kWh)
-                $dayTs = strtotime(substr($tIso, 0, 10));
-                $off   = (int)round(($dayTs - $refDayTs) / 86400);
-                if (!isset($dailyBuckets[$off])) $dailyBuckets[$off] = 0.0;
-                $dailyBuckets[$off] += $e_kwh_dc;
+                // für JSON
+                $series[] = [
+                    't' => $times[$i],
+                    'p_w' => (int)round($inst_kW * 1000.0),
+                    'e_kwh' => $e_kwh
+                ];
 
-                // Gesamtzeitreihe mappen (für json_total)
-                $json_total_map[$tIso] = ($json_total_map[$tIso] ?? 0) + $p_w;
+                // Gesamtzeitreihe
+                $json_total_map[$times[$i]] = ($json_total_map[$times[$i]] ?? 0) + (int)round($inst_kW * 1000.0);
             }
 
-            // Tages-Summen in das Gesamtergebnis einsammeln
-            $sumToday    += $dailyBuckets[0] ?? 0.0;
-            $sumTomorrow += $dailyBuckets[1] ?? 0.0;
-            $sumDayAfter += $dailyBuckets[2] ?? 0.0;
+            $ident = $this->arrayIdent((string)($arr['Name'] ?? ('Array_'.$idx)), $idx);
 
-            // String-Ident
-            $ident = $this->arrayIdent((string)($arr['Name'] ?? ('Array_'.$aIdx)), $aIdx);
-
-            // String-Output
             $stringsOut[$ident] = [
                 'now_w'     => $now_w,
-                'today_kwh' => $dailyBuckets[0] ?? 0.0,
-                'json'      => $series_points,
+                'today_kwh' => $daily[0] ?? 0.0,
+                'json'      => $series,
                 'horizon'   => $mask
             ];
 
             $total_now_w += $now_w;
+
+            $sumToday    += $daily[0] ?? 0.0;
+            $sumTomorrow += $daily[1] ?? 0.0;
+            $sumDayAfter += $daily[2] ?? 0.0;
         }
 
-        // --- Gesamtzeitreihe bauen (sortiert) ---
-        ksort($json_total_map, SORT_STRING);
+        // ---- Gesamtzeitreihe ----
+        ksort($json_total_map);
         $json_total = [];
-        foreach ($json_total_map as $tIso => $sumW) {
-            $json_total[] = ['t' => $tIso, 'p_w' => (int)$sumW];
+        foreach ($json_total_map as $t => $p) {
+            $json_total[] = ['t' => $t, 'p_w' => $p];
         }
 
         return [
             'total_power_now_w' => $total_now_w,
-            'daily'   => ['0' => $sumToday, '1' => $sumTomorrow, '2' => $sumDayAfter],
-            'strings' => $stringsOut,
-            'json_total' => $json_total
+            'daily'             => [
+                '0' => $sumToday,
+                '1' => $sumTomorrow,
+                '2' => $sumDayAfter
+            ],
+            'strings'           => $stringsOut,
+            'json_total'        => $json_total
         ];
     }
 
