@@ -22,6 +22,11 @@ class OpenMeteoPV extends IPSModule
         $this->RegisterPropertyInteger('UpdateMinutes', 60);
         $this->RegisterPropertyFloat('Albedo', 0.20);
 
+        // Diagnose-Optionen
+        $this->RegisterPropertyBoolean('EnableDiagnostics', false);
+        $this->RegisterPropertyInteger('DiagStartHour', 8);   // lokale Stunde (0..23)
+        $this->RegisterPropertyInteger('DiagEndHour', 11);    // lokale Stunde (0..23)
+
         // Strings/Ausrichtungen als JSON in einer Zeile (kompatible Eingabe über ValidationTextBox)
         $defaultArrays = json_encode([[
             'Name' => 'Sued',
@@ -59,7 +64,7 @@ class OpenMeteoPV extends IPSModule
     public function ApplyChanges()
     {
         parent::ApplyChanges();
-        // Per-String Variablen (Power/Today/ForecastJSON/HorizonJSON)
+        // Per-String Variablen (Power/Today/ForecastJSON/HorizonJSON/DiagJSON)
         $arrays = $this->getArrays();
         $pos = 30;
         $i = 0;
@@ -70,6 +75,7 @@ class OpenMeteoPV extends IPSModule
             $this->RegisterVariableFloat ($ident.'_Today_kWh', "Energie heute {$name} [kWh]", '', $pos++);
             $this->RegisterVariableString($ident.'_ForecastJSON', "Forecast JSON {$name}", '', $pos++);
             $this->RegisterVariableString($ident.'_HorizonJSON', "Horizon JSON {$name}", '', $pos++);
+            $this->RegisterVariableString($ident.'_DiagJSON', "Diagnose JSON {$name}", '', $pos++);
             $i++;
         }
 
@@ -108,6 +114,10 @@ class OpenMeteoPV extends IPSModule
                 ['type' => 'NumberSpinner', 'name' => 'PastDays', 'caption' => 'Vergangenheits‑Tage (0..7)'],
                 ['type' => 'NumberSpinner', 'name' => 'UpdateMinutes', 'caption' => 'Update‑Intervall (min)'],
                 ['type' => 'NumberSpinner', 'name' => 'Albedo', 'caption' => 'Albedo (0..1)', 'digits' => 2, 'minimum' => 0, 'maximum' => 1],
+                ['type' => 'Label', 'caption' => 'Diagnose (optional):'],
+                ['type' => 'CheckBox', 'name' => 'EnableDiagnostics', 'caption' => 'Diagnose aktiv (08–11 Uhr loggen)'],
+                ['type' => 'NumberSpinner', 'name' => 'DiagStartHour', 'caption' => 'Diagnose Startstunde (0..23)'],
+                ['type' => 'NumberSpinner', 'name' => 'DiagEndHour', 'caption' => 'Diagnose Endstunde (0..23)'],
                 ['type' => 'Label', 'caption' => 'Strings/Ausrichtungen als JSON (eine Zeile, siehe README):'],
                 ['type' => 'ValidationTextBox', 'name' => 'Arrays', 'caption' => 'JSON', 'value' => $arraysJson],
             ],
@@ -155,6 +165,9 @@ class OpenMeteoPV extends IPSModule
                 $this->SetValue($ident.'_ForecastJSON', json_encode($d['json'], JSON_UNESCAPED_SLASHES));
                 if (!empty($d['horizon'])) {
                     $this->SetValue($ident.'_HorizonJSON', json_encode($d['horizon'], JSON_UNESCAPED_SLASHES));
+                }
+                if (!empty($d['diag'])) {
+                    $this->SetValue($ident.'_DiagJSON', json_encode($d['diag'], JSON_UNESCAPED_SLASHES));
                 }
             }
         } catch (\Throwable $e) {
@@ -283,7 +296,6 @@ class OpenMeteoPV extends IPSModule
             for ($k = 0; $k < 4; $k++) {
                 $tk = $t0 + $k * 900;
                 if ($tk > $t1) $tk = $t1;
-                // Speichere ISO mit Offset UND sichere UTC-Epoch separat
                 $iso = date('c', $tk);
                 $times[] = $iso;
 
@@ -326,10 +338,9 @@ class OpenMeteoPV extends IPSModule
         $lon = deg2rad((float)$this->ReadPropertyFloat('Longitude'));
         $solar = [];
         for ($i = 0; $i < $n; $i++) {
-            // Parse ISO mit Offset und hole UTC-Timestamp explizit
-            $dt = new DateTime($times[$i]);            // nimmt Offset aus ISO
-            $dt->setTimezone(new DateTimeZone('UTC')); // auf UTC setzen
-            $tsUTC = $dt->getTimestamp();              // Epoch in UTC
+            $dt = new DateTime($times[$i]);
+            $dt->setTimezone(new DateTimeZone('UTC'));
+            $tsUTC = $dt->getTimestamp();
             $solar[$i] = $this->solarPosApprox($tsUTC, $lat, $lon);
         }
 
@@ -342,8 +353,13 @@ class OpenMeteoPV extends IPSModule
             if ($d < $best) { $best = $d; $nowIdx = $i; }
         }
 
-        // Tagesreferenz
+        // Tagesreferenz (lokale Datumsgrenze)
         $refDayTs = strtotime(substr($times[0], 0, 10));
+
+        // Diagnose-Fenster (lokale Stunden)
+        $diagEnabled = (bool)$this->ReadPropertyBoolean('EnableDiagnostics');
+        $diagH0 = max(0, min(23, (int)$this->ReadPropertyInteger('DiagStartHour')));
+        $diagH1 = max(0, min(23, (int)$this->ReadPropertyInteger('DiagEndHour')));
 
         // --------------------------------------------------------------------
         // 4. STRINGS
@@ -360,6 +376,7 @@ class OpenMeteoPV extends IPSModule
 
         foreach ($arrays as $idx => $arr) {
             $arrName = (string)($arr['Name'] ?? ('Array_'.$idx));
+            $ident = $this->arrayIdent($arrName, $idx);
             // Azimut-Korrektur: Modul (0=S,+90=W,-90=E) → Sonnen-Frame (0=S,+90=E)
             $az_deg = (float)($arr['Azimuth'] ?? 0.0);
             $aziM = deg2rad(-$az_deg);
@@ -375,6 +392,7 @@ class OpenMeteoPV extends IPSModule
             $diffOb = isset($arr['DiffuseObstruction']) ? (float)$arr['DiffuseObstruction'] : 1.0;
 
             $series = [];
+            $diagRows = [];
             $now_w = 0.0;
             $daily = [];
 
@@ -391,15 +409,16 @@ class OpenMeteoPV extends IPSModule
                 $cz = max(0.01, cos($zen)); // clamp gegen 0
                 $dniN_now_W  = $dniN_W[$i];
                 if ($dniN_now_W === null || $dniN_now_W === 0.0) {
-                    $dniN_now_W = $dirHor_W[$i] / $cz; // DBH -> DNI
+                    $dniN_now_W = ($dirHor_W[$i] > 0) ? ($dirHor_W[$i] / $cz) : 0.0; // DBH -> DNI
                 }
-                $dniN_now_Wh = ($dniN_Wh[$i] > 0) ? $dniN_Wh[$i] : ($dirHor_W[$i] * $scaleDIR / $cz);
+                $dniN_now_Wh = ($dniN_Wh[$i] > 0) ? $dniN_Wh[$i] : (($dirHor_W[$i] > 0) ? ($dirHor_W[$i] * $scaleDIR / $cz) : 0.0);
 
                 // Horizon-Maske mit Azimut-Normalisierung
                 $dhi_eff_W  = $dhi_W[$i];
                 $dhi_eff_Wh = $dhi_Wh[$i];
                 $dni_eff_W  = $dniN_now_W;
                 $dni_eff_Wh = $dniN_now_Wh;
+                $shaded = false;
 
                 if (count($mask) >= 2) {
                     $elSun = 90 - rad2deg($zen);
@@ -407,7 +426,7 @@ class OpenMeteoPV extends IPSModule
                     $azMaskDeg = fmod((rad2deg(-$azs) + 540.0), 360.0) - 180.0;
                     $hEl = $this->horizonElevation($mask, deg2rad($azMaskDeg));
 
-                    // Debug (nur am Now-Index, um Log zu schonen) – inkl. Stringname
+                    // Debug (nur am Now-Index) – inkl. Stringname
                     if ($i === $nowIdx) {
                         $this->SendDebug('MASK', sprintf('[%s] t=%s | azMask=%.1f° | hEl=%.1f° | elSun=%.1f°', $arrName, $times[$i], $azMaskDeg, $hEl, $elSun), 0);
                     }
@@ -416,7 +435,12 @@ class OpenMeteoPV extends IPSModule
                         $dni_eff_W  = 0.0;  $dni_eff_Wh = 0.0;
                         $dhi_eff_W  = $dhi_W[$i] * $diffOb;
                         $dhi_eff_Wh = $dhi_Wh[$i] * $diffOb;
+                        $shaded = true;
                     }
+                } else {
+                    $elSun = 90 - rad2deg($zen);
+                    $azMaskDeg = fmod((rad2deg(-$azs) + 540.0), 360.0) - 180.0;
+                    $hEl = 0.0;
                 }
 
                 // POA-Leistung (W/m²) und -Energie (Wh/m²)
@@ -453,6 +477,28 @@ class OpenMeteoPV extends IPSModule
                     $this->SendDebug('SUN', sprintf('[%s] t=%s | elev=%.1f° | cosZ=%.3f', $arrName, $times[$i], 90 - rad2deg($zen), cos($zen)), 0);
                 }
 
+                // Diagnose-Zeile: nur wenn aktiviert und lokale Stunde im Fenster und Datum = heutiges Datum
+                if ($diagEnabled) {
+                    $dtLocal = new DateTime($times[$i]); // ISO enthält Offset
+                    $hourLocal = (int)$dtLocal->format('G');
+                    $todayLocal = (new DateTime('now', $dtLocal->getTimezone()))->format('Y-m-d');
+                    $dateLocal  = $dtLocal->format('Y-m-d');
+                    if ($dateLocal === $todayLocal && $hourLocal >= $diagH0 && $hourLocal <= $diagH1) {
+                        $diagRows[] = [
+                            't'         => $times[$i],
+                            'azMask'    => round($azMaskDeg, 1),
+                            'hEl'       => round($hEl, 1),
+                            'elSun'     => round($elSun, 1),
+                            'dni_eff_W' => round($dni_eff_W, 1),
+                            'dhi_W'     => round($dhi_eff_W, 1),
+                            'cosT'      => round($cosT, 3),
+                            'poa_W'     => round($poa_W, 1),
+                            'p_W'       => (int)round($p_kW * 1000.0),
+                            'shaded'    => $shaded
+                        ];
+                    }
+                }
+
                 // Tag
                 $dayTs = strtotime(substr($times[$i], 0, 10));
                 $off = (int)(($dayTs - $refDayTs)/86400);
@@ -470,12 +516,12 @@ class OpenMeteoPV extends IPSModule
                 $json_total_map[$times[$i]] = ($json_total_map[$times[$i]] ?? 0) + (int)round($p_kW*1000.0);
             }
 
-            $ident = $this->arrayIdent($arrName, $idx);
             $stringsOut[$ident] = [
                 'now_w'     => $now_w,
                 'today_kwh' => $daily[0] ?? 0.0,
                 'json'      => $series,
-                'horizon'   => $mask
+                'horizon'   => $mask,
+                'diag'      => $diagRows
             ];
 
             $total_now   += $now_w;
@@ -515,43 +561,6 @@ class OpenMeteoPV extends IPSModule
             if ($d < $bestDiff) { $bestDiff = $d; $best = $i; }
         }
         return $best;
-    }
-
-    private function dailyBucketsFromSeries(array $pts): array {
-        $b = [];
-        if (!$pts) return $b;
-        $refDayTs = strtotime(substr($pts[0]['t'], 0, 10));
-        foreach ($pts as $p) {
-            $dayStr = substr($p['t'], 0, 10);
-            $dayTs = strtotime($dayStr);
-            $off = (int)round(($dayTs - $refDayTs) / 86400);
-            if (!isset($b[$off])) $b[$off] = 0.0;
-            // Bevorzugt Intervall-Energie verwenden (falls vorhanden)
-            if (isset($p['e_kwh'])) {
-                $b[$off] += max(0.0, (float)$p['e_kwh']);
-            } else {
-                // Fallback: p_w (W) in kWh umrechnen, angenommen hourly
-                $b[$off] += max(0.0, (float)$p['p_w']) / 1000.0;
-            }
-        }
-        return $b;
-    }
-
-    private function mergeTotalSeries(array $total, array $series): array
-    {
-        $map = [];
-        foreach ($total as $row) {
-            $map[$row['t']] = ($map[$row['t']] ?? 0) + (int)$row['p_w'];
-        }
-        foreach ($series as $row) {
-            $map[$row['t']] = ($map[$row['t']] ?? 0) + (int)$row['p_w'];
-        }
-        $res = [];
-        foreach ($map as $t => $p) {
-            $res[] = ['t' => $t, 'p_w' => (int)$p];
-        }
-        usort($res, fn($a,$b) => strcmp($a['t'],$b['t']));
-        return $res;
     }
 
     private function parseHorizonMask($maskField): array
