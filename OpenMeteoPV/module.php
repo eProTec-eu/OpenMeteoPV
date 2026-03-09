@@ -602,7 +602,9 @@ class OpenMeteoPV extends IPSModule
     private function solarPosApprox(int $ts, float $lat, float $lon): array
     {
         // vereinfachte Sonnenstandsberechnung (ausreichend für Forecast-Zwecke)
-        $d = ($ts - 946684800) / 86400.0; // Tage seit 2000-01-01 12:00:00 UTC
+        
+        // NEU (12:00 UTC am 2000-01-01, korrekt):
+        $d = ($ts - 946728000) / 86400.0;
         $L = deg2rad(fmod(280.46 + 0.9856474 * $d, 360.0));
         $g = deg2rad(fmod(357.528 + 0.9856003 * $d, 360.0));
         $lambda = $L + deg2rad(1.915) * sin($g) + deg2rad(0.020) * sin(2*$g);
@@ -620,6 +622,10 @@ class OpenMeteoPV extends IPSModule
         $zhor = $x * cos($lat) + $z * sin($lat);
         $azimuth = atan2($yhor, $xhor) + M_PI; // 0..2π, 0=Süden
         $zenith  = acos($zhor);
+
+        $elev = 90 - rad2deg($zenith);
+        $this->SendDebug('SUN', sprintf('t=%s elev=%.1f° cosZ=%.3f', $times[$i], $elev, cos($zenith)), 0);
+
         return ['zenith' => $zenith, 'azimuth' => $azimuth];
     }
 }
