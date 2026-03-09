@@ -265,6 +265,56 @@ class OpenMeteoPV extends IPSModule
             0
         );
 
+        /* --------------------------------------------------------------------
+        * 15-Minuten-Interpolation (4 Werte pro Stunde)
+        * macht aus stündlichen OM-Daten 96 Punkte pro Tag (realistische Peaks)
+        * -------------------------------------------------------------------- */
+        $step = 15 * 60; // 15 Minuten in Sekunden
+
+        $newTimes = [];
+        $newGHI   = [];
+        $newDNI   = [];
+        $newDHI   = [];
+        $newT2M   = [];
+
+        for ($i = 0; $i < count($times) - 1; $i++) {
+
+            $t0 = strtotime($times[$i]);
+            $t1 = strtotime($times[$i + 1]);
+
+            $ghi0 = $ghi[$i];
+            $ghi1 = $ghi[$i + 1];
+
+            $dni0 = $dni[$i];
+            $dni1 = $dni[$i + 1];
+
+            $dhi0 = $dhi[$i];
+            $dhi1 = $dhi[$i + 1];
+
+            $t20 = $t2m[$i];
+            $t21 = $t2m[$i + 1];
+
+            for ($t = $t0; $t < $t1; $t += $step) {
+                $alpha = ($t - $t0) / ($t1 - $t0);
+
+                $newTimes[] = date('c', $t);
+                $newGHI[]   = $ghi0 + $alpha * ($ghi1 - $ghi0);
+                $newDNI[]   = $dni0 + $alpha * ($dni1 - $dni0);
+                $newDHI[]   = $dhi0 + $alpha * ($dhi1 - $dhi0);
+                $newT2M[]   = $t20 + $alpha * ($t21 - $t20);
+            }
+        }
+
+        // Arrays überschreiben (weiteres Modul arbeitet 15-minütig)
+        $times = $newTimes;
+        $ghi   = $newGHI;
+        $dni   = $newDNI;
+        $dhi   = $newDHI;
+        $t2m   = $newT2M;
+
+        // Debug optional aktivieren:
+        $this->SendDebug("Interp", "15-min points: ".count($times), 0);
+
         $n = min(count($times), count($ghi), count($dni), count($dhi), count($t2m));
         if ($n === 0) {
             return ['total_power_now_w' => 0, 'daily' => [], 'strings' => [], 'json_total' => []];
