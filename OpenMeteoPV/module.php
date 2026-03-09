@@ -283,7 +283,9 @@ class OpenMeteoPV extends IPSModule
             for ($k = 0; $k < 4; $k++) {
                 $tk = $t0 + $k * 900;
                 if ($tk > $t1) $tk = $t1;
-                $times[] = date('c', $tk);
+                // Speichere ISO mit Offset UND sichere UTC-Epoch separat
+                $iso = date('c', $tk);
+                $times[] = $iso;
 
                 // Leistung W/m² (keine Skalierung)
                 $ghi_W[]    = $ghi_h[$i]     ?? 0.0;
@@ -318,15 +320,16 @@ class OpenMeteoPV extends IPSModule
         }
 
         // --------------------------------------------------------------------
-        // 3. SONNENPOSITION
+        // 3. SONNENPOSITION (UTC-sicher)
         // --------------------------------------------------------------------
         $lat = deg2rad((float)$this->ReadPropertyFloat('Latitude'));
         $lon = deg2rad((float)$this->ReadPropertyFloat('Longitude'));
         $solar = [];
         for ($i = 0; $i < $n; $i++) {
-            //$solar[$i] = $this->solarPosApprox(strtotime($times[$i]), $lat, $lon);
-            $ts = strtotime($times[$i]);
-            $tsUTC = $ts - date('Z', $ts);   // Z = Zeitzonenoffset in Sekunden
+            // Parse ISO mit Offset und hole UTC-Timestamp explizit
+            $dt = new DateTime($times[$i]);            // nimmt Offset aus ISO
+            $dt->setTimezone(new DateTimeZone('UTC')); // auf UTC setzen
+            $tsUTC = $dt->getTimestamp();              // Epoch in UTC
             $solar[$i] = $this->solarPosApprox($tsUTC, $lat, $lon);
         }
 
@@ -356,6 +359,7 @@ class OpenMeteoPV extends IPSModule
         $sumDayAfter = 0.0;
 
         foreach ($arrays as $idx => $arr) {
+            $arrName = (string)($arr['Name'] ?? ('Array_'.$idx));
             // Azimut-Korrektur: Modul (0=S,+90=W,-90=E) → Sonnen-Frame (0=S,+90=E)
             $az_deg = (float)($arr['Azimuth'] ?? 0.0);
             $aziM = deg2rad(-$az_deg);
@@ -403,9 +407,9 @@ class OpenMeteoPV extends IPSModule
                     $azMaskDeg = fmod((rad2deg(-$azs) + 540.0), 360.0) - 180.0;
                     $hEl = $this->horizonElevation($mask, deg2rad($azMaskDeg));
 
-                    // Debug (nur am Now-Index, um Log zu schonen)
+                    // Debug (nur am Now-Index, um Log zu schonen) – inkl. Stringname
                     if ($i === $nowIdx) {
-                        $this->SendDebug('MASK', sprintf('t=%s | azMask=%.1f° | hEl=%.1f° | elSun=%.1f°', $times[$i], $azMaskDeg, $hEl, $elSun), 0);
+                        $this->SendDebug('MASK', sprintf('[%s] t=%s | azMask=%.1f° | hEl=%.1f° | elSun=%.1f°', $arrName, $times[$i], $azMaskDeg, $hEl, $elSun), 0);
                     }
 
                     if ($elSun < $hEl) {
@@ -446,7 +450,7 @@ class OpenMeteoPV extends IPSModule
                 if ($i === $nowIdx) {
                     $now_w += $p_kW * 1000.0;
                     // Zusatz: Sonnenhöhe (Kontrolle)
-                    $this->SendDebug('SUN', sprintf('t=%s | elev=%.1f° | cosZ=%.3f', $times[$i], 90 - rad2deg($zen), cos($zen)), 0);
+                    $this->SendDebug('SUN', sprintf('[%s] t=%s | elev=%.1f° | cosZ=%.3f', $arrName, $times[$i], 90 - rad2deg($zen), cos($zen)), 0);
                 }
 
                 // Tag
@@ -466,7 +470,7 @@ class OpenMeteoPV extends IPSModule
                 $json_total_map[$times[$i]] = ($json_total_map[$times[$i]] ?? 0) + (int)round($p_kW*1000.0);
             }
 
-            $ident = $this->arrayIdent((string)($arr['Name'] ?? ('Array_'.$idx)), $idx);
+            $ident = $this->arrayIdent($arrName, $idx);
             $stringsOut[$ident] = [
                 'now_w'     => $now_w,
                 'today_kwh' => $daily[0] ?? 0.0,
@@ -608,20 +612,23 @@ class OpenMeteoPV extends IPSModule
         return $nx*$sx + $ny*$sy + $nz*$sz;
     }
 
-    private function solarPosApprox(int $ts, float $lat, float $lon): array
+    private function solarPosApprox(int $tsUTC, float $lat, float $lon): array
     {
         // vereinfachte Sonnenstandsberechnung (ausreichend für Forecast-Zwecke)
-        // Epoch auf 2000-01-01 12:00:00 UTC (946728000) korrigiert
-        $d = ($ts - 946728000) / 86400.0;
+        // Referenz: 2000-01-01 12:00:00 UTC (946728000)
+        $d = ($tsUTC - 946728000) / 86400.0;
         $L = deg2rad(fmod(280.46 + 0.9856474 * $d, 360.0));
         $g = deg2rad(fmod(357.528 + 0.9856003 * $d, 360.0));
         $lambda = $L + deg2rad(1.915) * sin($g) + deg2rad(0.020) * sin(2*$g);
         $epsilon = deg2rad(23.439 - 0.0000004 * $d);
         $RA = atan2(cos($epsilon)*sin($lambda), cos($lambda));
         $dec = asin(sin($epsilon)*sin($lambda));
+        // Greenwich Mean Sidereal Time in Stunden
         $GMST = fmod(18.697374558 + 24.06570982441908 * $d, 24.0);
+        // Local Sidereal Time (Radiant)
         $LST = deg2rad(($GMST * 15.0)) + $lon;
-        $HA = $LST - $RA;
+        $HA = $LST - $RA; // Stundenwinkel
+        // Horizontal-Koordinaten
         $x = cos($HA)*cos($dec);
         $y = sin($HA)*cos($dec);
         $z = sin($dec);
