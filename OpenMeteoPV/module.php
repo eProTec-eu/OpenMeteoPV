@@ -420,6 +420,12 @@ class OpenMeteoPV extends IPSModule
                 // Effektive Verluste
                 $lossEff = max(0.0, min(1.0, $loss));
 
+                $poa_Wm2 = ($dni_eff * $cosT)
+                        + ($dhi_eff * (1 + cos($tilt)) / 2.0)
+                        + ($ghi[$i] * $albedo * (1 - cos($tilt)) / 2.0);
+
+                $poa_Whm2 = $poa_Wm2 * $interval_hours;   // 15min → 0.25
+
                 // DC-Energie im Intervall (kWh) – Achtung: poa in Wh/m² → /1000 ergibt kWh/m²
                 $e_kwh_dc = $kWp * ($poa_Whm2 / 1000.0) * $lossEff * (1.0 + $gamma * ($tcell - 25.0));
                 $e_kwh_dc = max(0.0, $e_kwh_dc);
