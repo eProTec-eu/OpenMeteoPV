@@ -198,26 +198,54 @@ class OpenMeteoPV extends IPSModule
         $pd    = max(0, min(7,  (int)$this->ReadPropertyInteger('PastDays')));
         $useSat= (bool)$this->ReadPropertyBoolean('UseSatellite');
 
-        // Wir holen stündliche Strahlungs-/Wetterwerte (Wh/m²/h etc.)
         $hourly = 'shortwave_radiation,direct_radiation,diffuse_radiation,direct_normal_irradiance,temperature_2m,cloud_cover';
 
-        $base = $useSat
-            ? 'https://api.open-meteo.com/v1/satellite' // Satellite Radiation API (EU 10‑min; wir nutzen stündlich)
-            : 'https://api.open-meteo.com/v1/forecast'; // Forecast API (stündlich; DWD ICON 15‑min verfügbar)
+        // 1) Primär: Satellite-API oder Forecast-API (je nach UseSatellite)
+        $base = $useSat ? 'https://api.open-meteo.com/v1/satellite'
+                        : 'https://api.open-meteo.com/v1/forecast';
 
-        $url = sprintf(
-            '%s?latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_days=%d&past_days=%d',
-            $base, $lat, $lon, $hourly, $tz, $fd, $pd
-        );
+        $url1 = sprintf('%s?latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_days=%d&past_days=%d',
+                        $base, $lat, $lon, $hourly, $tz, $fd, $pd);
+        $raw1 = $this->fetchUrlJson($url1, 'primary');
 
-        $this->SendDebug('OpenMeteo URL', $url, 0);
-        $ctx = stream_context_create(['http' => ['timeout' => 15]]);
-        $res = @file_get_contents($url, false, $ctx);
-        if ($res === false) {
+        // 2) Fallback: Forecast-API, falls hourly leer/fehlt
+        if (!is_array($raw1) || empty($raw1['hourly']['time'])) {
+            $url2 = sprintf('%s?latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_days=%d&past_days=%d',
+                            'https://api.open-meteo.com/v1/forecast', $lat, $lon, $hourly, $tz, $fd, $pd);
+            $raw2 = $this->fetchUrlJson($url2, 'fallback-forecast');
+            return (is_array($raw2) && !empty($raw2['hourly']['time'])) ? $raw2 : null;
+        }
+        return $raw1;
+    }
+
+    private function fetchUrlJson(string $url, string $tag): ?array
+    {
+        $this->SendDebug('OpenMeteo URL ['.$tag.']', $url, 0);
+
+        // robuster Abruf: bevorzugt Sys_GetURLContent (Symcon), sonst stream
+        if (function_exists('Sys_GetURLContent')) {
+            $body = @Sys_GetURLContent($url);
+        } else {
+            $ctx  = stream_context_create(['http' => ['timeout' => 15]]);
+            $body = @file_get_contents($url, false, $ctx);
+        }
+
+        if ($body === false || $body === '') {
+            $this->SendDebug('OpenMeteo ['.$tag.']', 'Abruf fehlgeschlagen/leer', 0);
             return null;
         }
-        $j = json_decode($res, true);
-        return is_array($j) ? $j : null;
+        $j = json_decode($body, true);
+        if (!is_array($j)) {
+            $this->SendDebug('OpenMeteo ['.$tag.']', 'JSON ungültig', 0);
+            return null;
+        }
+
+        // Diagnose ins Debug
+        $vars = implode(',', array_keys($j['hourly'] ?? []));
+        $cnt  = count($j['hourly']['time'] ?? []);
+        $this->SendDebug('OpenMeteo ['.$tag.']', 'hourly='.$vars.' | Punkte='.$cnt, 0);
+
+        return $j;
     }
 
     private function computePV(array $raw): array
