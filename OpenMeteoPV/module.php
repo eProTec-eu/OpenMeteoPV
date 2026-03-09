@@ -259,6 +259,12 @@ class OpenMeteoPV extends IPSModule
         $dhi   = $raw['hourly']['diffuse_radiation']        ?? []; // Wh/m²/h
         $t2m   = $raw['hourly']['temperature_2m']           ?? [];
 
+        $this->SendDebug(
+            'VecCounts',
+            sprintf('ghi=%d dni=%d dhi=%d t2m=%d', count($ghi), count($dni), count($dhi), count($t2m)),
+            0
+        );
+
         $n = min(count($times), count($ghi), count($dni), count($dhi), count($t2m));
         if ($n === 0) {
             return ['total_power_now_w' => 0, 'daily' => [], 'strings' => [], 'json_total' => []];
