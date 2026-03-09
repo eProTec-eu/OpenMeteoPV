@@ -324,7 +324,10 @@ class OpenMeteoPV extends IPSModule
         $lon = deg2rad((float)$this->ReadPropertyFloat('Longitude'));
         $solar = [];
         for ($i = 0; $i < $n; $i++) {
-            $solar[$i] = $this->solarPosApprox(strtotime($times[$i]), $lat, $lon);
+            //$solar[$i] = $this->solarPosApprox(strtotime($times[$i]), $lat, $lon);
+            $ts = strtotime($times[$i]);
+            $tsUTC = $ts - date('Z', $ts);   // Z = Zeitzonenoffset in Sekunden
+            $solar[$i] = $this->solarPosApprox($tsUTC, $lat, $lon);
         }
 
         // Jetzt-Index
