@@ -388,37 +388,28 @@ class OpenMeteoPV extends IPSModule
                 }
                 $dniN_now_Wh = ($dniN_Wh[$i] > 0) ? $dniN_Wh[$i] : ($dirHor_W[$i] * $scaleDIR / $cz);
 
-                // Diffus
+                // Horizon-Maske mit Azimut-Normalisierung
                 $dhi_eff_W  = $dhi_W[$i];
                 $dhi_eff_Wh = $dhi_Wh[$i];
                 $dni_eff_W  = $dniN_now_W;
                 $dni_eff_Wh = $dniN_now_Wh;
 
-                // Horizon-Maske → Diffus-Abschattung
                 if (count($mask) >= 2) {
                     $elSun = 90 - rad2deg($zen);
-                    $hEl = $this->horizonElevation($mask, -$azs);
+                    // Sonnen-Azimut ins Maskensystem (0=S, -90=E, +90=W) und normalisieren auf [-180,180)
+                    $azMaskDeg = fmod((rad2deg(-$azs) + 540.0), 360.0) - 180.0;
+                    $hEl = $this->horizonElevation($mask, deg2rad($azMaskDeg));
+
+                    // Debug (nur am Now-Index, um Log zu schonen)
+                    if ($i === $nowIdx) {
+                        $this->SendDebug('MASK', sprintf('t=%s | azMask=%.1f° | hEl=%.1f° | elSun=%.1f°', $times[$i], $azMaskDeg, $hEl, $elSun), 0);
+                    }
+
                     if ($elSun < $hEl) {
                         $dni_eff_W  = 0.0;  $dni_eff_Wh = 0.0;
                         $dhi_eff_W  = $dhi_W[$i] * $diffOb;
                         $dhi_eff_Wh = $dhi_Wh[$i] * $diffOb;
                     }
-                }
-
-                // --- Diagnose ---
-                if ($i === $nowIdx) {
-                    $this->SendDebug('DUMP',
-                        sprintf(
-                            't=%s | cosZ=%.3f | DNI(W)=%.1f | DIR_HOR(W)=%.1f | cosT=%.3f | POA_W=%.1f',
-                            $times[$i],
-                            cos($zen),
-                            $dniN_now_W,
-                            $dirHor_W[$i],
-                            $cosT,
-                            isset($poa_W) ? $poa_W : -1
-                        ),
-                        0
-                    );
                 }
 
                 // POA-Leistung (W/m²) und -Energie (Wh/m²)
@@ -451,6 +442,8 @@ class OpenMeteoPV extends IPSModule
                 // "Jetzt"
                 if ($i === $nowIdx) {
                     $now_w += $p_kW * 1000.0;
+                    // Zusatz: Sonnenhöhe (Kontrolle)
+                    $this->SendDebug('SUN', sprintf('t=%s | elev=%.1f° | cosZ=%.3f', $times[$i], 90 - rad2deg($zen), cos($zen)), 0);
                 }
 
                 // Tag
@@ -566,8 +559,21 @@ class OpenMeteoPV extends IPSModule
     private function horizonElevation(array $mask, float $azimuthRad): float
     {
         if (count($mask) < 2) return 0.0;
-        usort($mask, fn($a,$b) => ($a['az'] <=> $b['az']));
+
+        // Masken-Azimutwerte in [-180°, +180°) normalisieren
+        foreach ($mask as &$pt) {
+            $az = (float)$pt['az'];
+            $az = fmod(($az + 540.0), 360.0) - 180.0;
+            $pt['az'] = $az;
+        }
+        unset($pt);
+
+        // Sonnen-Azimut (in Grad) aus Eingabe und normalisieren
         $az = rad2deg($azimuthRad);
+        $az = fmod(($az + 540.0), 360.0) - 180.0;
+
+        usort($mask, fn($a,$b) => ($a['az'] <=> $b['az']));
+
         $prev = end($mask); reset($mask);
         foreach ($mask as $pt) {
             if ($az <= $pt['az']) {
@@ -602,8 +608,7 @@ class OpenMeteoPV extends IPSModule
     private function solarPosApprox(int $ts, float $lat, float $lon): array
     {
         // vereinfachte Sonnenstandsberechnung (ausreichend für Forecast-Zwecke)
-        
-        // NEU (12:00 UTC am 2000-01-01, korrekt):
+        // Epoch auf 2000-01-01 12:00:00 UTC (946728000) korrigiert
         $d = ($ts - 946728000) / 86400.0;
         $L = deg2rad(fmod(280.46 + 0.9856474 * $d, 360.0));
         $g = deg2rad(fmod(357.528 + 0.9856003 * $d, 360.0));
@@ -622,7 +627,6 @@ class OpenMeteoPV extends IPSModule
         $zhor = $x * cos($lat) + $z * sin($lat);
         $azimuth = atan2($yhor, $xhor) + M_PI; // 0..2π, 0=Süden
         $zenith  = acos($zhor);
-
         return ['zenith' => $zenith, 'azimuth' => $azimuth];
     }
 }
