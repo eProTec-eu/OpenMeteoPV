@@ -420,13 +420,6 @@ class OpenMeteoPV extends IPSModule
                 $e_kwh_dc = $kWp * ($poa_Whm2 / 1000.0) * $lossEff * (1.0 + $gamma * ($tcell - 25.0));
                 $e_kwh_dc = max(0.0, $e_kwh_dc);
 
-                $this->SendDebug('Now',
-                    sprintf('cosT=%.3f | DNI_eff=%.1f | DHI_eff=%.1f | POA_Wh=%.1f | kWp=%.1f | e15=%.3f kWh | inst=%.2f kW',
-                        $cosT, $dni_eff, $dhi_eff, $poa_Whm2, $kWp, $e_kwh_dc, $inst_kW
-                    ),
-                    0
-                );
-
                 // Momentanleistung aus Intervall-Energie
                 $inst_kW = ($interval_hours > 0) ? ($e_kwh_dc / $interval_hours) : 0.0;
 
@@ -435,6 +428,13 @@ class OpenMeteoPV extends IPSModule
                     $inst_kW = min($inst_kW, $invLimitKW);
                     $e_kwh_dc = $inst_kW * $interval_hours; // korrigierte Intervallenergie nach Clipping
                 }
+
+                $this->SendDebug('Now',
+                    sprintf('cosT=%.3f | DNI_eff=%.1f | DHI_eff=%.1f | POA_Wh=%.1f | kWp=%.1f | e15=%.3f kWh | inst=%.2f kW',
+                        $cosT, $dni_eff, $dhi_eff, $poa_Whm2, $kWp, $e_kwh_dc, $inst_kW
+                    ),
+                    0
+                );                
 
                 // "Jetzt"-Wert (W)
                 if ($i === $nowIdx) {
