@@ -422,8 +422,8 @@ class OpenMeteoPV extends IPSModule
 
                 if (count($mask) >= 2) {
                     $elSun = 90 - rad2deg($zen);
-                    // *** FIX: KEIN Vorzeichenwechsel; 0=Süd, +90=West, -90=Ost ***
-                    $azMaskDeg = fmod((rad2deg($azs) + 540.0), 360.0) - 180.0;
+                    // *** KORREKTUR: Masken-Azimut = -azSun (0=S, -90=E, +90=W) ***
+                    $azMaskDeg = fmod(( -rad2deg($azs) + 540.0), 360.0) - 180.0;
                     $hEl = $this->horizonElevation($mask, deg2rad($azMaskDeg));
 
                     // Debug (nur am Now-Index) – inkl. Stringname
