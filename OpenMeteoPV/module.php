@@ -392,7 +392,7 @@ class OpenMeteoPV extends IPSModule
                 // Horizon-Maske anwenden (DNI blockieren, DHI ggf. dämpfen)
                 $elSun_deg = 90.0 - rad2deg($zen);
                 if (count($mask) >= 2) {
-                    $hEl = $this->horizonElevation($mask, $az); // Grad
+                    $hEl = $this->horizonElevation($mask, -$az); // Grad
                     if ($elSun_deg < $hEl) {
                         $dni_eff = 0.0;
                         $dhi_eff = $dhi15[$i] * $diffOb;
