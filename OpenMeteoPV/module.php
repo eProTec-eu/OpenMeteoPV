@@ -623,9 +623,6 @@ class OpenMeteoPV extends IPSModule
         $azimuth = atan2($yhor, $xhor) + M_PI; // 0..2π, 0=Süden
         $zenith  = acos($zhor);
 
-        $elev = 90 - rad2deg($zenith);
-        $this->SendDebug('SUN', sprintf('t=%s elev=%.1f° cosZ=%.3f', $times[$i], $elev, cos($zenith)), 0);
-
         return ['zenith' => $zenith, 'azimuth' => $azimuth];
     }
 }
