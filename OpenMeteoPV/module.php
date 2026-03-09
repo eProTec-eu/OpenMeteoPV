@@ -364,7 +364,11 @@ class OpenMeteoPV extends IPSModule
 
             // Parameter
             $tilt = deg2rad((float)($arr['Tilt']    ?? 30.0));
-            $aziM = deg2rad((float)($arr['Azimuth'] ??  0.0));  // 0=Süd; -90=Ost; +90=West
+            //$aziM = deg2rad((float)($arr['Azimuth'] ??  0.0));  // 0=Süd; -90=Ost; +90=West
+            
+            $az_mod_deg = (float)($arr['Azimuth'] ?? 0.0);
+            $aziM = deg2rad(-$az_mod_deg);
+
             $kWp  = (float)($arr['kWp']             ??  1.0);
             $loss = (float)($arr['LossFactor']      ??  0.95);
             $gamma= (float)($arr['Gamma']           ?? -0.0040);
