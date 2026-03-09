@@ -265,52 +265,53 @@ class OpenMeteoPV extends IPSModule
             0
         );
 
-        /* --------------------------------------------------------------------
-        * 15-Minuten-Interpolation (4 Werte pro Stunde)
-        * macht aus stündlichen OM-Daten 96 Punkte pro Tag (realistische Peaks)
-        * -------------------------------------------------------------------- */
-        $step = 15 * 60; // 15 Minuten in Sekunden
+    /* -------------------------------------------------------------
+    * Energie-erhaltende 15-Minuten-Interpolation
+    * OM hourly = Wh/m2 pro letzte Stunde (Energie!)
+    * Wir teilen diese Energie in 4 gleich große Teile.
+    * ------------------------------------------------------------- */
 
-        $newTimes = [];
-        $newGHI   = [];
-        $newDNI   = [];
-        $newDHI   = [];
-        $newT2M   = [];
+    $stepCount = 4; // 4 Werte pro Stunde
+    $newTimes = [];
+    $newGHI   = [];
+    $newDNI   = [];
+    $newDHI   = [];
+    $newT2M   = [];
 
-        for ($i = 0; $i < count($times) - 1; $i++) {
+    for ($i = 0; $i < count($times); $i++) {
 
-            $t0 = strtotime($times[$i]);
-            $t1 = strtotime($times[$i + 1]);
+        $t0 = strtotime($times[$i]);
 
-            $ghi0 = $ghi[$i];
-            $ghi1 = $ghi[$i + 1];
+        // Jede Stunde hat 4 Schritte à 15 Minuten
+        for ($k = 0; $k < $stepCount; $k++) {
 
-            $dni0 = $dni[$i];
-            $dni1 = $dni[$i + 1];
+            $tk = $t0 + $k * 15 * 60;
 
-            $dhi0 = $dhi[$i];
-            $dhi1 = $dhi[$i + 1];
+            $newTimes[] = date('c', $tk);
 
-            $t20 = $t2m[$i];
-            $t21 = $t2m[$i + 1];
+            // OM hourly values = Wh/m2 der letzten Stunde
+            // → korrekt auf 4 Schritte verteilen:
+            $newGHI[] = $ghi[$i] / $stepCount;
+            $newDNI[] = $dni[$i] / $stepCount;
+            $newDHI[] = $dhi[$i] / $stepCount;
 
-            for ($t = $t0; $t < $t1; $t += $step) {
-                $alpha = ($t - $t0) / ($t1 - $t0);
-
-                $newTimes[] = date('c', $t);
-                $newGHI[]   = $ghi0 + $alpha * ($ghi1 - $ghi0);
-                $newDNI[]   = $dni0 + $alpha * ($dni1 - $dni0);
-                $newDHI[]   = $dhi0 + $alpha * ($dhi1 - $dhi0);
-                $newT2M[]   = $t20 + $alpha * ($t21 - $t20);
+            // Temperatur ist kein Energiewert → lineare Interpolation sinnvoll
+            if ($i < count($times)-1) {
+                $t1 = strtotime($times[$i+1]);
+                $alpha = ($tk - $t0) / ($t1 - $t0);
+                $newT2M[] = $t2m[$i] + $alpha * ($t2m[$i+1] - $t2m[$i]);
+            } else {
+                $newT2M[] = $t2m[$i];
             }
         }
+    }
 
-        // Arrays überschreiben (weiteres Modul arbeitet 15-minütig)
-        $times = $newTimes;
-        $ghi   = $newGHI;
-        $dni   = $newDNI;
-        $dhi   = $newDHI;
-        $t2m   = $newT2M;
+    // Arrays ersetzen
+    $times = $newTimes;
+    $ghi   = $newGHI;
+    $dni   = $newDNI;
+    $dhi   = $newDHI;
+    $t2m   = $newT2M;
 
         // Debug optional aktivieren:
         $this->SendDebug("Interp", "15-min points: ".count($times), 0);
