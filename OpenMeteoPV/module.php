@@ -587,6 +587,174 @@ class OpenMeteoPV extends IPSModule
         return $this->computePV_FinalFromDataset($fc);
     }    
 
+    private function computePV_FinalFromDataset(array $fc): array
+    {
+        if (empty($fc['hourly']['time'])) {
+            return [
+                'total_power_now_w' => 0,
+                'daily' => ['0'=>0.0,'1'=>0.0,'2'=>0.0],
+                'strings' => [],
+                'json_total' => []
+            ];
+        }
+
+        // Forecast-Daten
+        $times = $fc['hourly']['time'];
+        $ghi   = $fc['hourly']['shortwave_radiation'] ?? [];
+        $dni   = $fc['hourly']['direct_normal_irradiance'] ?? [];
+        $dhi   = $fc['hourly']['diffuse_radiation'] ?? [];
+        $temp  = $fc['hourly']['temperature_2m'] ?? [];
+
+        $n = count($times);
+        if ($n === 0) {
+            return [
+                'total_power_now_w' => 0,
+                'daily' => ['0'=>0.0,'1'=>0.0,'2'=>0.0],
+                'strings' => [],
+                'json_total' => []
+            ];
+        }
+
+        // Sonnenposition vorberechnen
+        $latRad = deg2rad((float)$this->ReadPropertyFloat('Latitude'));
+        $lonRad = deg2rad((float)$this->ReadPropertyFloat('Longitude'));
+
+        $solar = [];
+        for ($i = 0; $i < $n; $i++) {
+            $dt = new DateTime($times[$i]);
+            $dt->setTimezone(new DateTimeZone('UTC'));
+            $solar[$i] = $this->solarPosApprox($dt->getTimestamp(), $latRad, $lonRad);
+        }
+
+        // Arrays / Strings
+        $arrays = $this->getArrays();
+        $albedo = (float)$this->ReadPropertyFloat('Albedo');
+
+        // Jetzt-Index (für Leistung "now")
+        $now = time();
+        $nowIdx = 0; $best = PHP_INT_MAX;
+        for ($i = 0; $i < $n; $i++) {
+            $d = abs(strtotime($times[$i]) - $now);
+            if ($d < $best) { $best = $d; $nowIdx = $i; }
+        }
+
+        // Tag-Referenz
+        $refDay = strtotime(substr($times[0], 0, 10));
+
+        $stringsOut = [];
+        $totalMap = [];
+        $sumToday = $sumTomorrow = $sumAfter = 0.0;
+
+        // --- PRO STRING ---
+        foreach ($arrays as $idx => $arr) {
+
+            $name = (string)($arr['Name'] ?? ("Array_".$idx));
+            $ident = $this->arrayIdent($name, $idx);
+
+            $tilt = deg2rad((float)($arr['Tilt'] ?? 30));
+            $azM  = deg2rad(-(float)($arr['Azimuth'] ?? 0));
+            $kWp  = (float)($arr['kWp'] ?? 1.0);
+            $loss = (float)($arr['LossFactor'] ?? 0.96);
+            $gamma= (float)($arr['Gamma'] ?? -0.004);
+            $NOCT = (float)($arr['NOCT'] ?? 45.0);
+            $inv  = (float)($arr['InverterLimit_kW'] ?? 0.0);
+            $mask = $this->parseHorizonMask($arr['HorizonMask'] ?? []);
+            $diffOb = (float)($arr['DiffuseObstruction'] ?? 1.0);
+
+            $series = [];
+            $daily = [];
+            $now_w = 0.0;
+
+            for ($i = 0; $i < $n; $i++) {
+
+                $zen = $solar[$i]['zenith'];
+                $azs = $solar[$i]['azimuth'];
+
+                // Einfallswinkel
+                $cosT = $this->cosIncidence($tilt, $azM, $zen, $azs);
+                if ($cosT < 0) $cosT = 0.0;
+
+                $elSun = 90 - rad2deg($zen);
+                $azMaskDeg = fmod(( -rad2deg($azs) + 540.0 ), 360.0) - 180.0;
+                $hEl = $this->horizonElevation($mask, deg2rad($azMaskDeg));
+
+                $dni_eff = ($elSun < $hEl) ? 0.0 : ($dni[$i] ?? 0.0);
+                $dhi_eff = ($elSun < $hEl) ? (($dhi[$i] ?? 0.0) * $diffOb) : ($dhi[$i] ?? 0.0);
+
+                // POA
+                $poa = $dni_eff * $cosT
+                    + $dhi_eff * (1 + cos($tilt)) / 2
+                    + ($ghi[$i] ?? 0.0) * $albedo * (1 - cos($tilt)) / 2;
+
+                if ($poa < 0) $poa = 0.0;
+
+                // Modultemperatur
+                $tcell = ($temp[$i] ?? 20.0) + ($NOCT - 20.0)/800.0 * $poa;
+
+                // Energie (kWh)
+                $e_kwh = $kWp * ($poa / 1000.0) * $loss * (1 + $gamma * ($tcell - 25.0));
+                if ($e_kwh < 0) $e_kwh = 0.0;
+
+                // Leistung (W)
+                $pW = $e_kwh * 1000.0;
+                if ($inv > 0 && $pW > $inv * 1000.0) {
+                    $pW = $inv * 1000.0;
+                }
+
+                // Jetzt
+                if ($i === $nowIdx) $now_w = $pW;
+
+                // Serienpunkt
+                $series[] = [
+                    't'   => $times[$i],
+                    'p_w' => (int)round($pW),
+                    'e_kwh' => $e_kwh
+                ];
+
+                // Tag summieren
+                $dayTs = strtotime(substr($times[$i], 0, 10));
+                $off = (int)(($dayTs - $refDay) / 86400);
+                if (!isset($daily[$off])) $daily[$off] = 0.0;
+                $daily[$off] += $e_kwh;
+
+                // Gesamt
+                $totalMap[$times[$i]] = ($totalMap[$times[$i]] ?? 0) + (int)round($pW);
+            }
+
+            $stringsOut[$ident] = [
+                'now_w'     => $now_w,
+                'today_kwh' => $daily[0] ?? 0.0,
+                'json'      => $series,
+                'horizon'   => $mask
+            ];
+
+            $sumToday    += $daily[0] ?? 0.0;
+            $sumTomorrow += $daily[1] ?? 0.0;
+            $sumAfter    += $daily[2] ?? 0.0;
+        }
+
+        // Gesamtzeitreihe sortieren
+        ksort($totalMap);
+        $jsonTotal = [];
+        foreach ($totalMap as $t => $p) {
+            $jsonTotal[] = ['t' => $t, 'p_w' => $p];
+        }
+
+        $total_now_w = 0.0;
+        foreach ($stringsOut as $s) $total_now_w += $s['now_w'];
+
+        return [
+            'total_power_now_w' => $total_now_w,
+            'daily' => [
+                '0' => $sumToday,
+                '1' => $sumTomorrow,
+                '2' => $sumAfter
+            ],
+            'strings' => $stringsOut,
+            'json_total' => $jsonTotal
+        ];
+    }
+
     /* ============================================================
      *  HELPERS
      * ============================================================ */
