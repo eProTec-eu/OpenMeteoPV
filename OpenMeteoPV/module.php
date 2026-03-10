@@ -362,12 +362,22 @@ class OpenMeteoPV extends IPSModule
     /* ============================================================
      *  PV-BERECHNUNG MIT NOWCAST-HYBRID
      * ============================================================ */
-    private function computePV(array $sat, array $fc): array
+    private function computePV(?array $sat, array $fc): array
     {
+        // Falls Satellite fehlt → Forecast-only
+        if ($sat === null || empty($sat['hourly']['time'])) {
+            $this->SendDebug('Nowcasting', 'Satellite-Daten fehlen → Forecast-only', 0);
+            return $this->computePV_ForecastOnly($fc);
+        }
+    
         // Nowcasting aktiv?
-        if ((bool)$this->ReadPropertyBoolean('EnableNowcast') && $sat && !empty($sat['hourly']['time'])) {
+        if ($sat !== null 
+            && !empty($sat['hourly']['time'])
+            && (bool)$this->ReadPropertyBoolean('EnableNowcast')) 
+        {
             $fc = $this->applySatelliteNowcast($sat, $fc);
         }
+
 
         // Forecast-Zeitachsen
         if (empty($fc['hourly']['time'])) {
@@ -569,6 +579,13 @@ class OpenMeteoPV extends IPSModule
             'json_total' => []
         ];
     }
+
+    private function computePV_ForecastOnly(array $fc): array
+    {
+        // identisch zu deinem POA/Strings/Masken-Teil,
+        // aber OHNE Nowcasting
+        return $this->computePV_FinalFromDataset($fc);
+    }    
 
     /* ============================================================
      *  HELPERS
