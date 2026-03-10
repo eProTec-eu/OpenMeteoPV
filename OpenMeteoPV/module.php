@@ -225,38 +225,36 @@ class OpenMeteoPV extends IPSModule
             ? 'auto'
             : urlencode($this->ReadPropertyString('Timezone'));
 
-        // Tages-Properties → Stunden umrechnen
-        $pd_days = max(0, min(7, (int)$this->ReadPropertyInteger('PastDays')));
-        $fd_days = max(1, min(16, (int)$this->ReadPropertyInteger('ForecastDays')));
+        // Formularwerte (Tage) sicher einlesen
+        $pd_days = max(0, min(7,  (int)$this->ReadPropertyInteger('PastDays')));     // 0..7 laut Forecast-API
+        $fd_days = max(1, min(16, (int)$this->ReadPropertyInteger('ForecastDays'))); // 1..16 laut Forecast-API
 
-        // Satellite erwartet Stunden, nicht Tage!
+        // Für SATELLITE sind Stunden gefordert (nicht Tage!)
+        // Quelle: Satellite Radiation API → forecast_hours / past_hours. [1](https://open-meteo.com/)
         $past_hours     = $pd_days * 24;
         $forecast_hours = $fd_days * 24;
 
         $useSat = (bool)$this->ReadPropertyBoolean('UseSatellite');
 
-        // gemeinsame hourly-Variablen
+        // Gemeinsame Variablen
         $hourly = 'shortwave_radiation,direct_radiation,diffuse_radiation,' .
                 'direct_normal_irradiance,temperature_2m,cloud_cover';
 
-        // -------- Satellite-Endpoint --------
+        // -------- SATELLITE-PRIME (EU: 10-min Raster) --------
         if ($useSat) {
-            // Satellite unterstützt NICHT forecast_days/past_days → darum forecast_hours/past_hours
+            // Achtung: /v1/satellite akzeptiert KEINE *_days-Parameter! [1](https://open-meteo.com/)
             $url1 = sprintf(
                 'https://api.open-meteo.com/v1/satellite?' .
-                'latitude=%F&longitude=%F&hourly=%s&timezone=%s&' .
-                'forecast_hours=%d&past_hours=%d',
+                'latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_hours=%d&past_hours=%d',
                 $lat, $lon, $hourly, $tz, $forecast_hours, $past_hours
             );
-
             $raw1 = $this->fetchUrlJson($url1, 'primary');
 
-            // Satellite antwortet leer → Fallback auf Forecast
+            // Falls leer → Fallback auf Forecast (Days-Parameter sind hier korrekt). [2](https://open-meteo.com/docs/openapi.yml)
             if (!is_array($raw1) || empty($raw1['hourly']['time'])) {
                 $url2 = sprintf(
                     'https://api.open-meteo.com/v1/forecast?' .
-                    'latitude=%F&longitude=%F&hourly=%s&timezone=%s&' .
-                    'forecast_days=%d&past_days=%d',
+                    'latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_days=%d&past_days=%d',
                     $lat, $lon, $hourly, $tz, $fd_days, $pd_days
                 );
                 $raw2 = $this->fetchUrlJson($url2, 'fallback-forecast');
@@ -266,18 +264,18 @@ class OpenMeteoPV extends IPSModule
             return $raw1;
         }
 
-        // -------- Forecast-Endpoint (Standard) --------
+        // -------- FORECAST-PRIME (Days) --------
+        // /v1/forecast erwartet forecast_days / past_days. [2](https://open-meteo.com/docs/openapi.yml)[3](blob:https://www.microsoft365.com/421d8f9b-0555-402f-b0f5-9dc968dedd40)
         $url = sprintf(
             'https://api.open-meteo.com/v1/forecast?' .
-            'latitude=%F&longitude=%F&hourly=%s&timezone=%s&' .
-            'forecast_days=%d&past_days=%d',
+            'latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_days=%d&past_days=%d',
             $lat, $lon, $hourly, $tz, $fd_days, $pd_days
         );
 
         $raw = $this->fetchUrlJson($url, 'forecast');
         return (is_array($raw) && !empty($raw['hourly']['time'])) ? $raw : null;
     }
-    
+
     private function fetchUrlJson(string $url, string $tag): ?array
     {
         $this->SendDebug('OpenMeteo URL ['.$tag.']', $url, 0);
