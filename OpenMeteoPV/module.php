@@ -226,50 +226,117 @@ class OpenMeteoPV extends IPSModule
             : urlencode($this->ReadPropertyString('Timezone'));
 
         // Formularwerte (Tage) sicher einlesen
-        $pd_days = max(0, min(7,  (int)$this->ReadPropertyInteger('PastDays')));     // 0..7 laut Forecast-API
-        $fd_days = max(1, min(16, (int)$this->ReadPropertyInteger('ForecastDays'))); // 1..16 laut Forecast-API
+        $pd_days = max(0, min(7,  (int)$this->ReadPropertyInteger('PastDays')));     // 0..7
+        $fd_days = max(1, min(16, (int)$this->ReadPropertyInteger('ForecastDays'))); // 1..16
 
-        // Für SATELLITE sind Stunden gefordert (nicht Tage!)
-        // Quelle: Satellite Radiation API → forecast_hours / past_hours. [1](https://open-meteo.com/)
+        // Satellite braucht Stunden, nicht Tage (Doku: forecast_hours / past_hours)
         $past_hours     = $pd_days * 24;
         $forecast_hours = $fd_days * 24;
 
         $useSat = (bool)$this->ReadPropertyBoolean('UseSatellite');
 
-        // Gemeinsame Variablen
-        $hourly = 'shortwave_radiation,direct_radiation,diffuse_radiation,' .
-                'direct_normal_irradiance,temperature_2m,cloud_cover';
+        // ===== Variablenlisten =====
+        // Satellite: NUR Strahlungs-Variablen; Temperatur/Cloud NICHT erlaubt! (sonst leere Response)
+        // Quelle: Satellite Radiation API
+        $hourly_sat = 'shortwave_radiation,direct_radiation,diffuse_radiation,direct_normal_irradiance';
 
-        // -------- SATELLITE-PRIME (EU: 10-min Raster) --------
+        // Forecast: was wir zum Mergen brauchen
+        $hourly_fc  = 'temperature_2m,cloud_cover';
+
+        // -------- 1) SATELLITE-PRIME (EU 10‑min nativ, per API 1‑stündig) --------
         if ($useSat) {
-            // Achtung: /v1/satellite akzeptiert KEINE *_days-Parameter! [1](https://open-meteo.com/)
-            $url1 = sprintf(
+            $urlSat = sprintf(
                 'https://api.open-meteo.com/v1/satellite?' .
                 'latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_hours=%d&past_hours=%d',
-                $lat, $lon, $hourly, $tz, $forecast_hours, $past_hours
+                $lat, $lon, $hourly_sat, $tz, $forecast_hours, $past_hours
             );
-            $raw1 = $this->fetchUrlJson($url1, 'primary');
+            $sat = $this->fetchUrlJson($urlSat, 'primary');
 
-            // Falls leer → Fallback auf Forecast (Days-Parameter sind hier korrekt). [2](https://open-meteo.com/docs/openapi.yml)
-            if (!is_array($raw1) || empty($raw1['hourly']['time'])) {
-                $url2 = sprintf(
+            // Wenn Satellite Daten liefert, aber ohne Temperatur → Forecast nachladen & MERGEN
+            if (is_array($sat) && !empty($sat['hourly']['time'])) {
+
+                // 1b) Minimaler Forecast-Call NUR für Temperatur/Cloud (Days-Parameter!)
+                $urlFc = sprintf(
                     'https://api.open-meteo.com/v1/forecast?' .
                     'latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_days=%d&past_days=%d',
-                    $lat, $lon, $hourly, $tz, $fd_days, $pd_days
+                    $lat, $lon, $hourly_fc, $tz, $fd_days, $pd_days
                 );
-                $raw2 = $this->fetchUrlJson($url2, 'fallback-forecast');
-                return (is_array($raw2) && !empty($raw2['hourly']['time'])) ? $raw2 : null;
+                $fc = $this->fetchUrlJson($urlFc, 'merge-forecast');
+
+                // Falls Forecast auch da: per Zeitstempel zusammenführen
+                if (is_array($fc) && !empty($fc['hourly']['time'])) {
+                    // Map der Forecast-Zeitstempel -> Werte
+                    $t2mMap = [];
+                    $cldMap = [];
+                    $fcTimes = $fc['hourly']['time'];
+                    $fcT2m   = $fc['hourly']['temperature_2m'] ?? [];
+                    $fcCld   = $fc['hourly']['cloud_cover']    ?? [];
+                    $nFC = count($fcTimes);
+
+                    for ($i = 0; $i < $nFC; $i++) {
+                        $t = (string)$fcTimes[$i];
+                        if (isset($fcT2m[$i])) $t2mMap[$t] = $fcT2m[$i];
+                        if (isset($fcCld[$i])) $cldMap[$t] = $fcCld[$i];
+                    }
+
+                    // Ziel-Arrays in Satellite-JSON anlegen
+                    if (!isset($sat['hourly']['temperature_2m'])) $sat['hourly']['temperature_2m'] = [];
+                    if (!isset($sat['hourly']['cloud_cover']))    $sat['hourly']['cloud_cover']    = [];
+
+                    // Satellite liefert 1‑stündige Zeiten (Backward‑Average) → sollten zu Forecast-Zeiten passen
+                    $satTimes = $sat['hourly']['time'];
+                    $nSat = count($satTimes);
+
+                    for ($i = 0; $i < $nSat; $i++) {
+                        $ts = (string)$satTimes[$i];
+
+                        // exakter ISO‑Match (beide mit timezone=auto)
+                        $t2m = $t2mMap[$ts] ?? null;
+                        $cld = $cldMap[$ts] ?? null;
+
+                        // Falls kein exakter Match (z. B. 10‑min offset), versuche auf volle Stunde zu normalisieren
+                        if ($t2m === null || $cld === null) {
+                            // Round down to hour (lokale ISO)
+                            $tsHour = substr($ts, 0, 13) . ':00:00' . substr($ts, 19); // "YYYY-MM-DDTHH:00:00+XX:YY"
+                            if ($t2m === null && isset($t2mMap[$tsHour])) $t2m = $t2mMap[$tsHour];
+                            if ($cld === null && isset($cldMap[$tsHour])) $cld = $cldMap[$tsHour];
+                        }
+
+                        // Fallbacks (Temperatur braucht die PV‑Berechnung zwingend)
+                        if ($t2m === null) $t2m = 12.0;       // milder Default, wird i. d. R. überschrieben
+                        if ($cld === null) $cld = 0.0;
+
+                        $sat['hourly']['temperature_2m'][$i] = $t2m;
+                        $sat['hourly']['cloud_cover'][$i]    = $cld;
+                    }
+                }
+
+                // Ergebnis: Satellite mit gemergter Temperatur/Cloud
+                return $sat;
             }
 
-            return $raw1;
+            // Satellite leer → Fallback FORECAST (Days)
+            $urlFcFull = sprintf(
+                'https://api.open-meteo.com/v1/forecast?' .
+                'latitude=%F&longitude=%F&hourly=%s,%s&timezone=%s&forecast_days=%d&past_days=%d',
+                $lat, $lon,
+                // hier für Fallback die komplette Liste (Radiation + T2m/Cloud):
+                'shortwave_radiation,direct_radiation,diffuse_radiation,direct_normal_irradiance',
+                'temperature_2m,cloud_cover',
+                $tz, $fd_days, $pd_days
+            );
+            $raw2 = $this->fetchUrlJson($urlFcFull, 'fallback-forecast');
+            return (is_array($raw2) && !empty($raw2['hourly']['time'])) ? $raw2 : null;
         }
 
-        // -------- FORECAST-PRIME (Days) --------
-        // /v1/forecast erwartet forecast_days / past_days. [2](https://open-meteo.com/docs/openapi.yml)[3](blob:https://www.microsoft365.com/421d8f9b-0555-402f-b0f5-9dc968dedd40)
+        // -------- 2) FORECAST-PRIME (Days) --------
         $url = sprintf(
             'https://api.open-meteo.com/v1/forecast?' .
-            'latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_days=%d&past_days=%d',
-            $lat, $lon, $hourly, $tz, $fd_days, $pd_days
+            'latitude=%F&longitude=%F&hourly=%s,%s&timezone=%s&forecast_days=%d&past_days=%d',
+            $lat, $lon,
+            'shortwave_radiation,direct_radiation,diffuse_radiation,direct_normal_irradiance',
+            'temperature_2m,cloud_cover',
+            $tz, $fd_days, $pd_days
         );
 
         $raw = $this->fetchUrlJson($url, 'forecast');
