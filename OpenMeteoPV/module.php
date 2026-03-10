@@ -190,7 +190,7 @@ class OpenMeteoPV extends IPSModule
         return strtoupper($base) . '_' . $idx;
     }
 
-    private function fetchOpenMeteo(): ?array
+    /*private function fetchOpenMeteo(): ?array
     {
         $lat = (float)$this->ReadPropertyFloat('Latitude');
         $lon = (float)$this->ReadPropertyFloat('Longitude');
@@ -216,8 +216,68 @@ class OpenMeteoPV extends IPSModule
             return (is_array($raw2) && !empty($raw2['hourly']['time'])) ? $raw2 : null;
         }
         return $raw1;
-    }
+    }*/
+    private function fetchOpenMeteo(): ?array
+    {
+        $lat = (float)$this->ReadPropertyFloat('Latitude');
+        $lon = (float)$this->ReadPropertyFloat('Longitude');
+        $tz  = ($this->ReadPropertyString('Timezone') === 'auto')
+            ? 'auto'
+            : urlencode($this->ReadPropertyString('Timezone'));
 
+        // Tages-Properties → Stunden umrechnen
+        $pd_days = max(0, min(7, (int)$this->ReadPropertyInteger('PastDays')));
+        $fd_days = max(1, min(16, (int)$this->ReadPropertyInteger('ForecastDays')));
+
+        // Satellite erwartet Stunden, nicht Tage!
+        $past_hours     = $pd_days * 24;
+        $forecast_hours = $fd_days * 24;
+
+        $useSat = (bool)$this->ReadPropertyBoolean('UseSatellite');
+
+        // gemeinsame hourly-Variablen
+        $hourly = 'shortwave_radiation,direct_radiation,diffuse_radiation,' .
+                'direct_normal_irradiance,temperature_2m,cloud_cover';
+
+        // -------- Satellite-Endpoint --------
+        if ($useSat) {
+            // Satellite unterstützt NICHT forecast_days/past_days → darum forecast_hours/past_hours
+            $url1 = sprintf(
+                'https://api.open-meteo.com/v1/satellite?' .
+                'latitude=%F&longitude=%F&hourly=%s&timezone=%s&' .
+                'forecast_hours=%d&past_hours=%d',
+                $lat, $lon, $hourly, $tz, $forecast_hours, $past_hours
+            );
+
+            $raw1 = $this->fetchUrlJson($url1, 'primary');
+
+            // Satellite antwortet leer → Fallback auf Forecast
+            if (!is_array($raw1) || empty($raw1['hourly']['time'])) {
+                $url2 = sprintf(
+                    'https://api.open-meteo.com/v1/forecast?' .
+                    'latitude=%F&longitude=%F&hourly=%s&timezone=%s&' .
+                    'forecast_days=%d&past_days=%d',
+                    $lat, $lon, $hourly, $tz, $fd_days, $pd_days
+                );
+                $raw2 = $this->fetchUrlJson($url2, 'fallback-forecast');
+                return (is_array($raw2) && !empty($raw2['hourly']['time'])) ? $raw2 : null;
+            }
+
+            return $raw1;
+        }
+
+        // -------- Forecast-Endpoint (Standard) --------
+        $url = sprintf(
+            'https://api.open-meteo.com/v1/forecast?' .
+            'latitude=%F&longitude=%F&hourly=%s&timezone=%s&' .
+            'forecast_days=%d&past_days=%d',
+            $lat, $lon, $hourly, $tz, $fd_days, $pd_days
+        );
+
+        $raw = $this->fetchUrlJson($url, 'forecast');
+        return (is_array($raw) && !empty($raw['hourly']['time'])) ? $raw : null;
+    }
+    
     private function fetchUrlJson(string $url, string $tag): ?array
     {
         $this->SendDebug('OpenMeteo URL ['.$tag.']', $url, 0);
