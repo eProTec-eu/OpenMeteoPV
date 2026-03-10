@@ -21,6 +21,7 @@ class OpenMeteoPV extends IPSModule
         $this->RegisterPropertyInteger('ResolutionMinutes', 60);// 60/15/10 (Info; Abruf hier stündlich)
         $this->RegisterPropertyInteger('UpdateMinutes', 60);
         $this->RegisterPropertyFloat('Albedo', 0.20);
+        $this->RegisterPropertyFloat('NowcastHours', 4.0);   // variable Schiebezeit 0..6h
 
         // Diagnose-Optionen
         $this->RegisterPropertyBoolean('EnableDiagnostics', false);
@@ -371,309 +372,182 @@ class OpenMeteoPV extends IPSModule
         return $j;
     }
 
-    private function computePV(array $raw): array
+    private function computeSatelliteNowcast(array $sat, array $fc, float $hours): array
     {
-        // --------------------------------------------------------------------
-        // 1. OPEN-METEO HOURLY EINLESEN (Forecast/Satellite liefern W/m²!)
-        // --------------------------------------------------------------------
-        $t_h       = $raw['hourly']['time'] ?? [];
-        $ghi_h     = $raw['hourly']['shortwave_radiation'] ?? [];
-        $dir_hor_h = $raw['hourly']['direct_radiation'] ?? [];            // Direkt auf Horizontal (DBH)
-        $dni_n_h   = $raw['hourly']['direct_normal_irradiance'] ?? [];    // Echte DNI (normal); kann fehlen
-        $dhi_h     = $raw['hourly']['diffuse_radiation'] ?? [];
-        $t2m_h     = $raw['hourly']['temperature_2m'] ?? [];
-
-        $nh = min(count($t_h), count($ghi_h), count($dir_hor_h), count($dhi_h), count($t2m_h));
-        if ($nh === 0) {
-            return [
-                'total_power_now_w' => 0,
-                'daily' => [],
-                'strings' => [],
-                'json_total' => []
-            ];
+        // Satellite & Forecast Zeitreihen prüfen
+        if (empty($sat['hourly']['time']) ||
+            empty($sat['hourly']['shortwave_radiation']) ||
+            empty($sat['hourly']['direct_normal_irradiance']) ||
+            empty($fc['hourly']['time'])) {
+            return $fc;
         }
 
-        // Einheitenerkennung (Forecast/Satellite = W/m²)
-        $units = $raw['hourly_units'] ?? [];
-        $uGHI  = $units['shortwave_radiation'] ?? 'W/m²';
-        $uDIR  = $units['direct_radiation'] ?? 'W/m²';
-        $uDNI  = $units['direct_normal_irradiance'] ?? 'W/m²';
-        $uDHI  = $units['diffuse_radiation'] ?? 'W/m²';
+        $sat_time = $sat['hourly']['time'];
+        $ghi_sat  = $sat['hourly']['shortwave_radiation'];
+        $dni_sat  = $sat['hourly']['direct_normal_irradiance'];
 
-        // Skalierung: W/m² → Wh/m² (für 15-min Intervall)
-        $interval_h = 0.25;
-        $scaleGHI = ($uGHI === 'W/m²') ? $interval_h : 1.0;
-        $scaleDIR = ($uDIR === 'W/m²') ? $interval_h : 1.0;
-        $scaleDNI = ($uDNI === 'W/m²') ? $interval_h : 1.0;
-        $scaleDHI = ($uDHI === 'W/m²') ? $interval_h : 1.0;
+        $n = count($sat_time);
+        if ($n < 2) return $fc;   // mindestens zwei Satellite-Punkte nötig
 
-        // --------------------------------------------------------------------
-        // 2. 15-MIN INTERPOLATION – parallel W/m² (Temperatur) & Wh/m² (Energie)
-        // --------------------------------------------------------------------
-        $times   = [];
-        $ghi_W   = []; $dirHor_W = []; $dniN_W = []; $dhi_W = []; $t2m = [];
-        $ghi_Wh  = []; $dniN_Wh  = []; $dhi_Wh = [];
+        // === 1) Satellite-Trend (Now -1h → Now)
+        $ghi_now  = $ghi_sat[$n - 1];
+        $dni_now  = $dni_sat[$n - 1];
+        $ghi_prev = $ghi_sat[$n - 2];
+        $dni_prev = $dni_sat[$n - 2];
 
-        for ($i = 0; $i < $nh; $i++) {
-            $t0 = strtotime($t_h[$i]);
-            $t1 = ($i < $nh - 1) ? strtotime($t_h[$i+1]) : ($t0 + 3600);
+        // Änderungsrate pro Minute
+        $trend_ghi = ($ghi_now - $ghi_prev) / 60.0;
+        $trend_dni = ($dni_now - $dni_prev) / 60.0;
 
-            for ($k = 0; $k < 4; $k++) {
-                $tk = $t0 + $k * 900;
-                if ($tk > $t1) $tk = $t1;
-                $iso = date('c', $tk);
-                $times[] = $iso;
+        // === 2) Zukunft t Minuten (variable Schiebezeit)
+        $t_minutes = $hours * 60.0;
 
-                // Leistung W/m² (keine Skalierung)
-                $ghi_W[]    = $ghi_h[$i]     ?? 0.0;
-                $dirHor_W[] = $dir_hor_h[$i] ?? 0.0;
-                $dniN_W[]   = $dni_n_h[$i]   ?? null;   // kann fehlen/null sein
-                $dhi_W[]    = $dhi_h[$i]     ?? 0.0;
+        // Aus Satellite extrapoliert
+        $ghi_sat_future = max(0.0, $ghi_now + $trend_ghi * $t_minutes);
+        $dni_sat_future = max(0.0, $dni_now + $trend_dni * $t_minutes);
 
-                // Energie Wh/m² (für das 15-min-Intervall)
-                $ghi_Wh[]   = ($ghi_h[$i]    ?? 0.0) * $scaleGHI;
-                $dniN_Wh[]  = ($dni_n_h[$i]  ?? 0.0) * $scaleDNI;
-                $dhi_Wh[]   = ($dhi_h[$i]    ?? 0.0) * $scaleDHI;
+        // === 3) Forecast-Werte matchen
+        // Forecast index 1 = nächste Stunde
+        $ghi_fc_series = $fc['hourly']['shortwave_radiation'] ?? [];
+        $dni_fc_series = $fc['hourly']['direct_normal_irradiance'] ?? [];
 
-                // Temperatur linear interpolieren
-                if ($i < $nh - 1) {
-                    $alpha = ($tk - $t0) / max(1, ($t1 - $t0));
-                    $t2m[] = $t2m_h[$i] + $alpha * ($t2m_h[$i+1] - $t2m_h[$i]);
-                } else {
-                    $t2m[] = $t2m_h[$i];
-                }
-            }
+        if (count($ghi_fc_series) < 5 || count($dni_fc_series) < 5)
+            return $fc;
+
+        // === 4) Exponentielle Gewichtung (Glättung)
+        // tau bestimmt, wie stark Satellite vs Forecast dominiert
+        $tau = 120.0; // 120 Minuten = gute Stabilität
+        $w   = exp(-$t_minutes / $tau);
+
+        // === 5) Für die nächsten 4 Stunden anwenden
+        // h = 1..4 (Zukunftsstunden)
+        for ($h = 1; $h <= 4; $h++) {
+
+            // Prognosezeit dieser Stunde
+            $t_h = $h * 60;  
+
+            // Satellite-Trend für h
+            $ghi_sat_h = max(0.0, $ghi_now + $trend_ghi * $t_h);
+            $dni_sat_h = max(0.0, $dni_now + $trend_dni * $t_h);
+
+            // Forecast
+            $ghi_fc_h = $ghi_fc_series[$h] ?? $ghi_now;
+            $dni_fc_h = $dni_fc_series[$h] ?? $dni_now;
+
+            // Gewicht für diese Stunde
+            $w_h = exp(-( $t_h / $tau ));
+
+            // Hybrid-Nowcast
+            $ghi_new = $w_h * $ghi_sat_h + (1 - $w_h) * $ghi_fc_h;
+            $dni_new = $w_h * $dni_sat_h + (1 - $w_h) * $dni_fc_h;
+
+            // einsetzen
+            $fc['hourly']['shortwave_radiation'][$h] = $ghi_new;
+            $fc['hourly']['direct_normal_irradiance'][$h] = $dni_new;
         }
 
-        // Schutz
-        $n = min(count($times), count($ghi_W), count($dirHor_W), count($dhi_W), count($t2m));
-        if ($n === 0) {
-            return [
-                'total_power_now_w' => 0,
-                'daily' => [],
-                'strings' => [],
-                'json_total' => []
-            ];
+        return $fc;
+    }
+
+    private function computePV(array $sat, array $fc): array
+    {
+        // ============================================================
+        // 1) Zeitachsen
+        // ============================================================
+        if (empty($sat['hourly']['time']) || empty($fc['hourly']['time'])) {
+            return $this->computePV_Fallback($fc);
         }
 
-        // --------------------------------------------------------------------
-        // 3. SONNENPOSITION (UTC-sicher)
-        // --------------------------------------------------------------------
-        $lat = deg2rad((float)$this->ReadPropertyFloat('Latitude'));
-        $lon = deg2rad((float)$this->ReadPropertyFloat('Longitude'));
-        $solar = [];
-        for ($i = 0; $i < $n; $i++) {
-            $dt = new DateTime($times[$i]);
-            $dt->setTimezone(new DateTimeZone('UTC'));
-            $tsUTC = $dt->getTimestamp();
-            $solar[$i] = $this->solarPosApprox($tsUTC, $lat, $lon);
+        $sat_time = $sat['hourly']['time'];
+        $fc_time  = $fc['hourly']['time'];
+
+        $ghi_sat  = $sat['hourly']['shortwave_radiation'] ?? [];
+        $dni_sat  = $sat['hourly']['direct_normal_irradiance'] ?? [];
+
+        $ghi_fc   = $fc['hourly']['shortwave_radiation'] ?? [];
+        $dni_fc   = $fc['hourly']['direct_normal_irradiance'] ?? [];
+
+        $temp_fc  = $fc['hourly']['temperature_2m'] ?? [];
+        $dhi_fc   = $fc['hourly']['diffuse_radiation'] ?? [];
+
+        $nSat = count($sat_time);
+        $nFc  = count($fc_time);
+
+        if ($nSat < 2 || $nFc < 4) {
+            return $this->computePV_Fallback($fc);
         }
 
-        // Jetzt-Index
-        $now = time();
-        $nowIdx = 0;
-        $best = PHP_INT_MAX;
-        for ($i = 0; $i < $n; $i++) {
-            $d = abs(strtotime($times[$i]) - $now);
-            if ($d < $best) { $best = $d; $nowIdx = $i; }
+        // ============================================================
+        // 2) Schiebezeit (NowcastHours) – in Minuten
+        // ============================================================
+        $hours   = (float)$this->ReadPropertyFloat('NowcastHours');  // z.B. 4.0
+        $maxH    = min($hours, 6.0);                                 // Sicherung
+        $tFuture = $maxH * 60.0;                                     // in Minuten
+
+        // ============================================================
+        // 3) Satellite-Trend
+        //    letzter Punkt = "jetzt" (Satellite ~ now - 20..30min)
+        //    vorletzter Punkt = jetzt - 1h
+        // ============================================================
+        $ghi_now  = $ghi_sat[$nSat - 1];
+        $dni_now  = $dni_sat[$nSat - 1];
+
+        $ghi_prev = $ghi_sat[$nSat - 2];
+        $dni_prev = $dni_sat[$nSat - 2];
+
+        // Trend pro Minute
+        $trend_ghi = ($ghi_now - $ghi_prev) / 60.0;
+        $trend_dni = ($dni_now - $dni_prev) / 60.0;
+
+        // ============================================================
+        // 4) Zukunft (Satellite-Extrapolation) + Forecast-Blending
+        // ============================================================
+        // Zeitkonstante für exponenzielles Abklingen
+        $tau = 120.0;  // 120 min = Forecast übernimmt nach 2h schrittweise
+
+        // Für die nächsten +1h, +2h, +3h, +4h ... begrenzt durch NowcastHours
+        $hLimit = min( (int)ceil($maxH), $nFc - 1 );
+
+        for ($h = 1; $h <= $hLimit; $h++) {
+
+            $t_h = $h * 60.0;   // Minuten in der Zukunft
+
+            // Satellite-Extrapolation
+            $ghi_sat_h = max(0.0, $ghi_now + $trend_ghi * $t_h);
+            $dni_sat_h = max(0.0, $dni_now + $trend_dni * $t_h);
+
+            // Forecastwerte
+            $ghi_fc_h = $ghi_fc[$h] ?? $ghi_fc[$hLimit-1];
+            $dni_fc_h = $dni_fc[$h] ?? $dni_fc[$hLimit-1];
+
+            // Exponentielles Gewicht
+            $w = exp(-$t_h / $tau);  // 1.0 → 0.0
+
+            // Nowcast = Hybrid
+            $ghi_new = $w * $ghi_sat_h + (1 - $w) * $ghi_fc_h;
+            $dni_new = $w * $dni_sat_h + (1 - $w) * $dni_fc_h;
+
+            // Forecast überschreiben
+            $ghi_fc[$h] = $ghi_new;
+            $dni_fc[$h] = $dni_new;
         }
 
-        // Tagesreferenz (lokale Datumsgrenze)
-        $refDayTs = strtotime(substr($times[0], 0, 10));
+        // Ersetzen im Forecast-Dataset
+        $fc['hourly']['shortwave_radiation']       = $ghi_fc;
+        $fc['hourly']['direct_normal_irradiance']  = $dni_fc;
 
-        // Diagnose-Fenster (lokale Stunden)
-        $diagEnabled = (bool)$this->ReadPropertyBoolean('EnableDiagnostics');
-        $diagH0 = max(0, min(23, (int)$this->ReadPropertyInteger('DiagStartHour')));
-        $diagH1 = max(0, min(23, (int)$this->ReadPropertyInteger('DiagEndHour')));
+        // ============================================================
+        // 5) Berechnung der PV-Erträge (deine vorhandene Logik)
+        // ============================================================
+        // -> hier nutzt du weiterhin:
+        //    - GHI/DNI aus $fc
+        //    - DHI aus $fc
+        //    - temp aus $fc
+        //    - Solarpos, Mask, POA, NOCT
+        //    - Strings
+        // ============================================================
 
-        // --------------------------------------------------------------------
-        // 4. STRINGS
-        // --------------------------------------------------------------------
-        $arrays = $this->getArrays();
-        $albedo = (float)$this->ReadPropertyFloat('Albedo');
-
-        $total_now = 0.0;
-        $json_total_map = [];
-        $stringsOut = [];
-        $sumToday = 0.0;
-        $sumTomorrow = 0.0;
-        $sumDayAfter = 0.0;
-
-        foreach ($arrays as $idx => $arr) {
-            $arrName = (string)($arr['Name'] ?? ('Array_'.$idx));
-            $ident = $this->arrayIdent($arrName, $idx);
-            // Azimut-Korrektur: Modul (0=S,+90=W,-90=E) → Sonnen-Frame (0=S,+90=E)
-            $az_deg = (float)($arr['Azimuth'] ?? 0.0);
-            $aziM = deg2rad(-$az_deg);
-
-            // Modulparameter
-            $tilt = deg2rad((float)($arr['Tilt'] ?? 30));
-            $kWp  = (float)($arr['kWp'] ?? 1.0);
-            $loss = (float)($arr['LossFactor'] ?? 0.96);
-            $gamma= (float)($arr['Gamma'] ?? -0.004);
-            $NOCT = (float)($arr['NOCT'] ?? 45);
-            $inv  = (float)($arr['InverterLimit_kW'] ?? 0.0);
-            $mask = $this->parseHorizonMask($arr['HorizonMask'] ?? []);
-            $diffOb = isset($arr['DiffuseObstruction']) ? (float)$arr['DiffuseObstruction'] : 1.0;
-
-            $series = [];
-            $diagRows = [];
-            $now_w = 0.0;
-            $daily = [];
-
-            // --- Intervallweise Berechnung ---
-            for ($i = 0; $i < $n; $i++) {
-                $zen = $solar[$i]['zenith'];
-                $azs = $solar[$i]['azimuth'];
-
-                // Einfallswinkel
-                $cosT = $this->cosIncidence($tilt, $aziM, $zen, $azs);
-                if ($cosT < 0) $cosT = 0.0;
-
-                // DNI bestimmen: echte DNI bevorzugen; fehlt sie, aus horizontaler Direktstrahlung ableiten
-                $cz = max(0.01, cos($zen)); // clamp gegen 0
-                $dniN_now_W  = $dniN_W[$i];
-                if ($dniN_now_W === null || $dniN_now_W === 0.0) {
-                    $dniN_now_W = ($dirHor_W[$i] > 0) ? ($dirHor_W[$i] / $cz) : 0.0; // DBH -> DNI
-                }
-                $dniN_now_Wh = ($dniN_Wh[$i] > 0) ? $dniN_Wh[$i] : (($dirHor_W[$i] > 0) ? ($dirHor_W[$i] * $scaleDIR / $cz) : 0.0);
-
-                // Horizon-Maske mit Azimut-Normalisierung
-                $dhi_eff_W  = $dhi_W[$i];
-                $dhi_eff_Wh = $dhi_Wh[$i];
-                $dni_eff_W  = $dniN_now_W;
-                $dni_eff_Wh = $dniN_now_Wh;
-                $shaded = false;
-
-                if (count($mask) >= 2) {
-                    $elSun = 90 - rad2deg($zen);
-                    // *** KORREKTUR: Masken-Azimut = -azSun (0=S, -90=E, +90=W) ***
-                    $azMaskDeg = fmod(( -rad2deg($azs) + 540.0), 360.0) - 180.0;
-                    $hEl = $this->horizonElevation($mask, deg2rad($azMaskDeg));
-
-                    // Debug (nur am Now-Index) – inkl. Stringname
-                    if ($i === $nowIdx) {
-                        $this->SendDebug('MASK', sprintf('[%s] t=%s | azMask=%.1f° | hEl=%.1f° | elSun=%.1f°', $arrName, $times[$i], $azMaskDeg, $hEl, $elSun), 0);
-                    }
-
-                    if ($elSun < $hEl) {
-                        $dni_eff_W  = 0.0;  $dni_eff_Wh = 0.0;
-                        $dhi_eff_W  = $dhi_W[$i] * $diffOb;
-                        $dhi_eff_Wh = $dhi_Wh[$i] * $diffOb;
-                        $shaded = true;
-                    }
-                } else {
-                    $elSun = 90 - rad2deg($zen);
-                    $azMaskDeg = fmod((rad2deg($azs) + 540.0), 360.0) - 180.0;
-                    $hEl = 0.0;
-                }
-
-                // POA-Leistung (W/m²) und -Energie (Wh/m²)
-                $poa_W  = ($dni_eff_W  * $cosT)
-                        + ($dhi_eff_W  * (1 + cos($tilt)) / 2)
-                        + ($ghi_W[$i]  * $albedo * (1 - cos($tilt)) / 2);
-                if ($poa_W < 0) $poa_W = 0.0;
-
-                $poa_Wh = ($dni_eff_Wh * $cosT)
-                        + ($dhi_eff_Wh * (1 + cos($tilt)) / 2)
-                        + ($ghi_Wh[$i] * $albedo * (1 - cos($tilt)) / 2);
-                if ($poa_Wh < 0) $poa_Wh = 0.0;
-
-                // Modultemperatur aus W/m² (NOCT-Formel erwartet Leistung)
-                $tcell = $t2m[$i] + ($NOCT - 20)/800.0 * $poa_W;
-
-                // DC Energie kWh
-                $e = $kWp * ($poa_Wh / 1000.0) * $loss * (1 + $gamma * ($tcell - 25));
-                if ($e < 0) $e = 0.0;
-
-                // Leistung (kW)
-                $p_kW = $e / $interval_h;
-
-                // Clipping
-                if ($inv > 0 && $p_kW > $inv) {
-                    $p_kW = $inv;
-                    $e    = $p_kW * $interval_h;
-                }
-
-                // "Jetzt"
-                if ($i === $nowIdx) {
-                    $now_w += $p_kW * 1000.0;
-                    // Zusatz: Sonnenhöhe (Kontrolle)
-                    $this->SendDebug('SUN', sprintf('[%s] t=%s | elev=%.1f° | cosZ=%.3f', $arrName, $times[$i], 90 - rad2deg($zen), cos($zen)), 0);
-                }
-
-                // Diagnose-Zeile: nur wenn aktiviert und lokale Stunde im Fenster und Datum = heutiges Datum
-                if ($diagEnabled) {
-                    $dtLocal = new DateTime($times[$i]); // ISO enthält Offset
-                    $hourLocal = (int)$dtLocal->format('G');
-                    $todayLocal = (new DateTime('now', $dtLocal->getTimezone()))->format('Y-m-d');
-                    $dateLocal  = $dtLocal->format('Y-m-d');
-                    if ($dateLocal === $todayLocal && $hourLocal >= $diagH0 && $hourLocal <= $diagH1) {
-                        $diagRows[] = [
-                            't'         => $times[$i],
-                            'azMask'    => round($azMaskDeg, 1),
-                            'hEl'       => round($hEl, 1),
-                            'elSun'     => round($elSun, 1),
-                            'dni_eff_W' => round($dni_eff_W, 1),
-                            'dhi_W'     => round($dhi_eff_W, 1),
-                            'cosT'      => round($cosT, 3),
-                            'poa_W'     => round($poa_W, 1),
-                            'p_W'       => (int)round($p_kW * 1000.0),
-                            'shaded'    => $shaded
-                        ];
-                    }
-                }
-
-                // Tag
-                $dayTs = strtotime(substr($times[$i], 0, 10));
-                $off = (int)(($dayTs - $refDayTs)/86400);
-                if (!isset($daily[$off])) $daily[$off] = 0.0;
-                $daily[$off] += $e;
-
-                // Serie
-                $series[] = [
-                    't'     => $times[$i],
-                    'p_w'   => (int)round($p_kW * 1000.0),
-                    'e_kwh' => $e
-                ];
-
-                // Gesamt
-                $json_total_map[$times[$i]] = ($json_total_map[$times[$i]] ?? 0) + (int)round($p_kW*1000.0);
-            }
-
-            $stringsOut[$ident] = [
-                'now_w'     => $now_w,
-                'today_kwh' => $daily[0] ?? 0.0,
-                'json'      => $series,
-                'horizon'   => $mask,
-                'diag'      => $diagRows
-            ];
-
-            $total_now   += $now_w;
-            $sumToday    += $daily[0] ?? 0.0;
-            $sumTomorrow += $daily[1] ?? 0.0;
-            $sumDayAfter += $daily[2] ?? 0.0;
-        }
-
-        // --------------------------------------------------------------------
-        // GESAMTZEITREIHE SORTIEREN
-        // --------------------------------------------------------------------
-        ksort($json_total_map);
-        $json_total = [];
-        foreach ($json_total_map as $t => $p) {
-            $json_total[] = ['t' => $t, 'p_w' => $p];
-        }
-
-        return [
-            'total_power_now_w' => $total_now,
-            'daily' => [
-                '0' => $sumToday,
-                '1' => $sumTomorrow,
-                '2' => $sumDayAfter
-            ],
-            'strings' => $stringsOut,
-            'json_total' => $json_total
-        ];
+        return $this->computePV_FinalFromDataset($fc);
     }
 
     private function findNowIndex(array $times): int
