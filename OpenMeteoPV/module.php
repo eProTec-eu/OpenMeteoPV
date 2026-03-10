@@ -3,58 +3,90 @@ declare(strict_types=1);
 
 class OpenMeteoPV extends IPSModule
 {
-    /* =========================
-     * Lifecycle
-     * ========================= */
+    /* ============================================================
+     *  LIFECYCLE
+     * ============================================================ */
     public function Create()
     {
         parent::Create();
-        // Basis-Properties
-        $this->RegisterPropertyFloat('Latitude', 52.8343);
+
+        // Standort
+        $this->RegisterPropertyFloat('Latitude',  52.8343);
         $this->RegisterPropertyFloat('Longitude', 8.1555);
-        $this->RegisterPropertyString('Timezone', 'auto');
-        // Open-Meteo Optionen
-        $this->RegisterPropertyBoolean('UseSatellite', true); // Satellite Radiation API (EU 10-min)
-        $this->RegisterPropertyBoolean('UseGTI', false);      // GTI direkt vom API je String (optional)
-        $this->RegisterPropertyInteger('ForecastDays', 3);    // 1..16 (Open-Meteo)
-        $this->RegisterPropertyInteger('PastDays', 1);        // 0..7
-        $this->RegisterPropertyInteger('ResolutionMinutes', 60);// 60/15/10 (Info; Abruf hier stündlich)
+        $this->RegisterPropertyString('Timezone', 'auto'); // oder z. B. 'Europe/Berlin'
+
+        // Datenquellen / Optionen
+        $this->RegisterPropertyBoolean('UseSatellite', true); // Satellite Radiation API (EU)
+        $this->RegisterPropertyInteger('ForecastDays', 3);    // 1..16 (Forecast)
+        $this->RegisterPropertyInteger('PastDays', 1);        // 0..7 (Forecast); Satellite nutzt hours
         $this->RegisterPropertyInteger('UpdateMinutes', 60);
+
+        // Nowcasting (Methode 2)
+        $this->RegisterPropertyBoolean('EnableNowcast', true);
+        $this->RegisterPropertyFloat('NowcastHours', 4.0); // 0.5..6.0 h
+
+        // Albedo
         $this->RegisterPropertyFloat('Albedo', 0.20);
-        $this->RegisterPropertyFloat('NowcastHours', 4.0);   // variable Schiebezeit 0..6h
 
-        // Diagnose-Optionen
+        // Diagnose
         $this->RegisterPropertyBoolean('EnableDiagnostics', false);
-        $this->RegisterPropertyInteger('DiagStartHour', 8);   // lokale Stunde (0..23)
-        $this->RegisterPropertyInteger('DiagEndHour', 11);    // lokale Stunde (0..23)
+        $this->RegisterPropertyInteger('DiagStartHour', 7);
+        $this->RegisterPropertyInteger('DiagEndHour', 12);
 
-        // Strings/Ausrichtungen als JSON in einer Zeile (kompatible Eingabe über ValidationTextBox)
+        // Strings/Ausrichtungen als JSON
         $defaultArrays = json_encode([[
-            'Name' => 'Sued',
-            'kWp' => 7.0,
-            'Tilt' => 30.0,
-            'Azimuth' => 0.0, // 0°=Süd, -90°=Ost, +90°=West, ±180°=Nord
+            'Name' => 'Ost',
+            'kWp' => 2.7,
+            'Tilt' => 10,
+            'Azimuth' => -80, // 0°=Süd, -90°=Ost, +90°=West
             'LossFactor' => 0.90,
-            'Gamma' => -0.0040,
+            'Gamma' => -0.004,
             'NOCT' => 45.0,
-            'InverterLimit_kW' => 6.0,
+            'InverterLimit_kW' => 10.0,
             'HorizonMask' => [
-                ['az' => -60, 'el' => 5],
-                ['az' =>   0, 'el' => 8],
-                ['az' =>  60, 'el' => 6]
+                ['az' => -130, 'el' => 32],
+                ['az' => -120, 'el' => 31],
+                ['az' => -110, 'el' => 29],
+                ['az' => -100, 'el' => 28],
+                ['az' =>  -90, 'el' => 27],
+                ['az' =>  -80, 'el' => 25],
+                ['az' =>  -70, 'el' => 22],
+                ['az' =>  -60, 'el' => 20],
+                ['az' =>  -40, 'el' => 14],
+                ['az' =>  -20, 'el' => 10],
+                ['az' =>    0, 'el' =>  8],
+                ['az' =>   60, 'el' => 28],
+                ['az' =>   90, 'el' => 32],
+                ['az' =>  120, 'el' => 36]
             ],
-            'DiffuseObstruction' => 1.00
-        ]]);
+            'DiffuseObstruction' => 1.0
+        ],[
+            'Name' => 'West',
+            'kWp' => 2.7,
+            'Tilt' => 10,
+            'Azimuth' => +100,
+            'LossFactor' => 0.92,
+            'Gamma' => -0.004,
+            'NOCT' => 45.0,
+            'InverterLimit_kW' => 10.0,
+            'HorizonMask' => [
+                ['az' => -60, 'el' => 8],
+                ['az' =>   0, 'el' => 8],
+                ['az' => +60, 'el' => 10]
+            ],
+            'DiffuseObstruction' => 1.0
+        ]], JSON_UNESCAPED_SLASHES);
+
         $this->RegisterPropertyString('Arrays', $defaultArrays);
 
-        // Variablen (Gesamt)
+        // Variablen (gesamt)
         $this->RegisterVariableInteger('TotalPower_W', 'Leistung (gesamt) [W]', '~Watt', 10);
-        $this->RegisterVariableFloat ('Today_kWh', 'Energie heute [kWh]', '', 20);
-        $this->RegisterVariableFloat ('Tomorrow_kWh', 'Energie morgen [kWh]', '', 21);
-        $this->RegisterVariableFloat ('DayAfter_kWh', 'Energie übermorgen [kWh]', '', 22);
+        $this->RegisterVariableFloat('Today_kWh', 'Energie heute [kWh]', '', 20);
+        $this->RegisterVariableFloat('Tomorrow_kWh', 'Energie morgen [kWh]', '', 21);
+        $this->RegisterVariableFloat('DayAfter_kWh', 'Energie übermorgen [kWh]', '', 22);
         $this->RegisterVariableString('ForecastJSON', 'Forecast JSON (gesamt)', '', 90);
 
-        // Timer → ruft RequestAction('Update') auf (keine globale Funktion nötig)
+        // Timer
         $this->RegisterTimer(
             'OMPV_Update',
             0,
@@ -65,38 +97,31 @@ class OpenMeteoPV extends IPSModule
     public function ApplyChanges()
     {
         parent::ApplyChanges();
-        // Per-String Variablen (Power/Today/ForecastJSON/HorizonJSON/DiagJSON)
-        $arrays = $this->getArrays();
-        $pos = 30;
-        $i = 0;
-        foreach ($arrays as $a) {
-            $name = isset($a['Name']) ? (string)$a['Name'] : ('Array_'.$i);
+
+        // String-Variablen je Array
+        $arrs = $this->getArrays();
+        $pos = 30; $i = 0;
+        foreach ($arrs as $a) {
+            $name = isset($a['Name']) ? (string)$a['Name'] : ("Array_".$i);
             $ident = $this->arrayIdent($name, $i);
             $this->RegisterVariableInteger($ident.'_Power_W', "Leistung {$name} [W]", '~Watt', $pos++);
-            $this->RegisterVariableFloat ($ident.'_Today_kWh', "Energie heute {$name} [kWh]", '', $pos++);
+            $this->RegisterVariableFloat($ident.'_Today_kWh', "Energie heute {$name} [kWh]", '', $pos++);
             $this->RegisterVariableString($ident.'_ForecastJSON', "Forecast JSON {$name}", '', $pos++);
             $this->RegisterVariableString($ident.'_HorizonJSON', "Horizon JSON {$name}", '', $pos++);
             $this->RegisterVariableString($ident.'_DiagJSON', "Diagnose JSON {$name}", '', $pos++);
             $i++;
         }
 
-        // Timerintervall
         $minutes = max(10, (int)$this->ReadPropertyInteger('UpdateMinutes'));
         $this->SetTimerInterval('OMPV_Update', $minutes * 60 * 1000);
 
-        // Initial-Update
+        // Initiales Update
         $this->Update();
     }
 
-    /* =========================
-     * Konfigurationsformular (kompatibel)
-     * ========================= */
     public function GetConfigurationForm()
     {
-        $arraysJson = $this->ReadPropertyString('Arrays');
-        if ($arraysJson === '' || $arraysJson === null) {
-            $arraysJson = '[]';
-        }
+        $arraysJson = $this->ReadPropertyString('Arrays') ?: '[]';
         return json_encode([
             'elements' => [
                 ['type' => 'NumberSpinner', 'name' => 'Latitude',  'caption' => 'Breite (°)'],
@@ -108,18 +133,23 @@ class OpenMeteoPV extends IPSModule
                         ['caption' => date_default_timezone_get(), 'value' => date_default_timezone_get()]
                     ]
                 ],
-                ['type' => 'CheckBox', 'name' => 'UseSatellite', 'caption' => 'Satellite Radiation API (EU, 10‑min)'],
-                ['type' => 'CheckBox', 'name' => 'UseGTI', 'caption' => 'GTI direkt (je String)'],
-                ['type' => 'NumberSpinner', 'name' => 'ResolutionMinutes', 'caption' => 'Auflösung (min; 10/15/60)'],
-                ['type' => 'NumberSpinner', 'name' => 'ForecastDays', 'caption' => 'Prognose‑Tage (1..16)'],
-                ['type' => 'NumberSpinner', 'name' => 'PastDays', 'caption' => 'Vergangenheits‑Tage (0..7)'],
-                ['type' => 'NumberSpinner', 'name' => 'UpdateMinutes', 'caption' => 'Update‑Intervall (min)'],
+                ['type' => 'CheckBox', 'name' => 'UseSatellite', 'caption' => 'Satellite Radiation API (EU)'],
+                ['type' => 'NumberSpinner', 'name' => 'ForecastDays', 'caption' => 'Forecast-Tage (1..16)'],
+                ['type' => 'NumberSpinner', 'name' => 'PastDays', 'caption' => 'Vergangenheits-Tage (0..7)'],
+                ['type' => 'NumberSpinner', 'name' => 'UpdateMinutes', 'caption' => 'Update-Intervall (min)'],
+
+                ['type' => 'Label', 'caption' => 'Nowcasting (Methode 2)'],
+                ['type' => 'CheckBox', 'name' => 'EnableNowcast', 'caption' => 'Nowcasting aktiv'],
+                ['type' => 'NumberSpinner', 'name' => 'NowcastHours', 'caption' => 'Schiebezeit (0.5..6.0 h)', 'digits' => 1, 'minimum' => 0.5, 'maximum' => 6],
+
                 ['type' => 'NumberSpinner', 'name' => 'Albedo', 'caption' => 'Albedo (0..1)', 'digits' => 2, 'minimum' => 0, 'maximum' => 1],
-                ['type' => 'Label', 'caption' => 'Diagnose (optional):'],
-                ['type' => 'CheckBox', 'name' => 'EnableDiagnostics', 'caption' => 'Diagnose aktiv (08–11 Uhr loggen)'],
+
+                ['type' => 'Label', 'caption' => 'Diagnose:'],
+                ['type' => 'CheckBox', 'name' => 'EnableDiagnostics', 'caption' => 'Diagnose aktiv (Fenster)'],
                 ['type' => 'NumberSpinner', 'name' => 'DiagStartHour', 'caption' => 'Diagnose Startstunde (0..23)'],
                 ['type' => 'NumberSpinner', 'name' => 'DiagEndHour', 'caption' => 'Diagnose Endstunde (0..23)'],
-                ['type' => 'Label', 'caption' => 'Strings/Ausrichtungen als JSON (eine Zeile, siehe README):'],
+
+                ['type' => 'Label', 'caption' => 'Strings/Ausrichtungen (JSON, eine Zeile):'],
                 ['type' => 'ValidationTextBox', 'name' => 'Arrays', 'caption' => 'JSON', 'value' => $arraysJson],
             ],
             'actions' => [
@@ -128,9 +158,6 @@ class OpenMeteoPV extends IPSModule
         ]);
     }
 
-    /* =========================
-     * RequestAction → Update
-     * ========================= */
     public function RequestAction($Ident, $Value)
     {
         if ($Ident === 'Update') {
@@ -140,218 +167,121 @@ class OpenMeteoPV extends IPSModule
         throw new Exception("Invalid Ident: $Ident");
     }
 
-    /* =========================
-     * Update / Logik
-     * ========================= */
+    /* ============================================================
+     *  UPDATE
+     * ============================================================ */
     public function Update()
     {
         try {
-            $raw = $this->fetchOpenMeteo();
-            if (!$raw) {
-                $this->SendDebug('Update', 'Keine Daten empfangen', 0);
+            // 1) Daten holen
+            $sat = $this->fetchSatelliteData();
+            $fc  = $this->fetchForecastData();
+
+            if (!$fc || empty($fc['hourly']['time'])) {
+                $this->SendDebug('Update', 'Forecast leer/ungültig — Abbruch', 0);
                 return;
             }
-            $r = $this->computePV($raw);
-            // Gesamt
-            $this->SetValue('TotalPower_W', (int)round($r['total_power_now_w']));
-            $this->SetValue('Today_kWh',    round($r['daily']['0'] ?? 0.0, 2));
-            $this->SetValue('Tomorrow_kWh', round($r['daily']['1'] ?? 0.0, 2));
-            $this->SetValue('DayAfter_kWh', round($r['daily']['2'] ?? 0.0, 2));
-            $this->SetValue('ForecastJSON', json_encode($r['json_total'], JSON_UNESCAPED_SLASHES));
 
-            // Strings
-            foreach ($r['strings'] as $ident => $d) {
-                $this->SetValue($ident.'_Power_W',   (int)round($d['now_w']));
-                $this->SetValue($ident.'_Today_kWh', round($d['today_kwh'], 2));
-                $this->SetValue($ident.'_ForecastJSON', json_encode($d['json'], JSON_UNESCAPED_SLASHES));
-                if (!empty($d['horizon'])) {
-                    $this->SetValue($ident.'_HorizonJSON', json_encode($d['horizon'], JSON_UNESCAPED_SLASHES));
-                }
-                if (!empty($d['diag'])) {
-                    $this->SetValue($ident.'_DiagJSON', json_encode($d['diag'], JSON_UNESCAPED_SLASHES));
-                }
+            // 2) computePV (Nowcasting + Hybrid)
+            $r = $this->computePV($sat, $fc);
+
+            // 3) Gesamt
+            $this->SetValue('TotalPower_W', (int)round($r['total_power_now_w'] ?? 0));
+            $this->SetValue('Today_kWh',    round($r['daily']['0'] ?? 0, 2));
+            $this->SetValue('Tomorrow_kWh', round($r['daily']['1'] ?? 0, 2));
+            $this->SetValue('DayAfter_kWh', round($r['daily']['2'] ?? 0, 2));
+            $this->SetValue('ForecastJSON', json_encode($r['json_total'] ?? [], JSON_UNESCAPED_SLASHES));
+
+            // 4) Strings
+            foreach (($r['strings'] ?? []) as $ident => $d) {
+                if (isset($d['now_w'])) $this->SetValue($ident.'_Power_W', (int)round($d['now_w']));
+                if (isset($d['today_kwh'])) $this->SetValue($ident.'_Today_kWh', round($d['today_kwh'], 2));
+                if (isset($d['json'])) $this->SetValue($ident.'_ForecastJSON', json_encode($d['json'], JSON_UNESCAPED_SLASHES));
+                if (isset($d['horizon'])) $this->SetValue($ident.'_HorizonJSON', json_encode($d['horizon'], JSON_UNESCAPED_SLASHES));
+                if (isset($d['diag'])) $this->SetValue($ident.'_DiagJSON', json_encode($d['diag'], JSON_UNESCAPED_SLASHES));
             }
         } catch (\Throwable $e) {
             $this->SendDebug('Update ERROR', $e->getMessage(), 0);
         }
     }
 
-    /* =========================
-     * Internals / Helpers
-     * ========================= */
-    private function getArrays(): array
-    {
-        $a = json_decode($this->ReadPropertyString('Arrays'), true);
-        return is_array($a) ? $a : [];
-    }
+    /* ============================================================
+     *  FETCH: Satellite (Vergangenheit) + Forecast (Zukunft)
+     * ============================================================ */
 
-    private function arrayIdent(string $name, int $idx): string
+    private function fetchSatelliteData(): ?array
     {
-        $base = preg_replace('/[^A-Za-z0-9_]/', '_', $name);
-        return strtoupper($base) . '_' . $idx;
-    }
+        if (!(bool)$this->ReadPropertyBoolean('UseSatellite')) return null;
 
-    /*private function fetchOpenMeteo(): ?array
-    {
         $lat = (float)$this->ReadPropertyFloat('Latitude');
         $lon = (float)$this->ReadPropertyFloat('Longitude');
-        $tz  = $this->ReadPropertyString('Timezone') === 'auto' ? 'auto' : urlencode($this->ReadPropertyString('Timezone'));
-        $fd  = max(1, min(16, (int)$this->ReadPropertyInteger('ForecastDays')));
-        $pd  = max(0, min(7, (int)$this->ReadPropertyInteger('PastDays')));
-        $useSat = (bool)$this->ReadPropertyBoolean('UseSatellite');
+        $tz  = ($this->ReadPropertyString('Timezone') === 'auto') ? 'auto' : urlencode($this->ReadPropertyString('Timezone'));
 
-        $hourly = 'shortwave_radiation,direct_radiation,diffuse_radiation,direct_normal_irradiance,temperature_2m,cloud_cover';
+        // Satellite: nur Radiation-Variablen (kein temp/cloud!)
+        $hourly = 'shortwave_radiation,direct_radiation,diffuse_radiation,direct_normal_irradiance';
 
-        // 1) Primär: Satellite-API oder Forecast-API (je nach UseSatellite)
-        $base = $useSat ? 'https://api.open-meteo.com/v1/satellite'
-                        : 'https://api.open-meteo.com/v1/forecast';
-        $url1 = sprintf('%s?latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_days=%d&past_days=%d',
-                        $base, $lat, $lon, $hourly, $tz, $fd, $pd);
-        $raw1 = $this->fetchUrlJson($url1, 'primary');
+        // Wir brauchen nur Vergangenheit / Jetzt (Trend). 6..48h reichen.
+        $pd_days = max(0, min(7, (int)$this->ReadPropertyInteger('PastDays')));
+        $past_hours = max(6, min(48, $pd_days * 24));  // min. 6h, max. 48h
+        $forecast_hours = 0; // Satellite liefert keine echte Zukunft
 
-        // 2) Fallback: Forecast-API, falls hourly leer/fehlt
-        if (!is_array($raw1) || empty($raw1['hourly']['time'])) {
-            $url2 = sprintf('%s?latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_days=%d&past_days=%d',
-                            'https://api.open-meteo.com/v1/forecast', $lat, $lon, $hourly, $tz, $fd, $pd);
-            $raw2 = $this->fetchUrlJson($url2, 'fallback-forecast');
-            return (is_array($raw2) && !empty($raw2['hourly']['time'])) ? $raw2 : null;
-        }
-        return $raw1;
-    }*/
-    private function fetchOpenMeteo(): ?array
-    {
-        $lat = (float)$this->ReadPropertyFloat('Latitude');
-        $lon = (float)$this->ReadPropertyFloat('Longitude');
-        $tz  = ($this->ReadPropertyString('Timezone') === 'auto')
-            ? 'auto'
-            : urlencode($this->ReadPropertyString('Timezone'));
-
-        // Formularwerte (Tage) sicher einlesen
-        $pd_days = max(0, min(7,  (int)$this->ReadPropertyInteger('PastDays')));     // 0..7
-        $fd_days = max(1, min(16, (int)$this->ReadPropertyInteger('ForecastDays'))); // 1..16
-
-        // Satellite braucht Stunden, nicht Tage (Doku: forecast_hours / past_hours)
-        $past_hours     = $pd_days * 24;
-        $forecast_hours = $fd_days * 24;
-
-        $useSat = (bool)$this->ReadPropertyBoolean('UseSatellite');
-
-        // ===== Variablenlisten =====
-        // Satellite: NUR Strahlungs-Variablen; Temperatur/Cloud NICHT erlaubt! (sonst leere Response)
-        // Quelle: Satellite Radiation API
-        $hourly_sat = 'shortwave_radiation,direct_radiation,diffuse_radiation,direct_normal_irradiance';
-
-        // Forecast: was wir zum Mergen brauchen
-        $hourly_fc  = 'temperature_2m,cloud_cover';
-
-        // -------- 1) SATELLITE-PRIME (EU 10‑min nativ, per API 1‑stündig) --------
-        if ($useSat) {
-            $urlSat = sprintf(
-                'https://api.open-meteo.com/v1/satellite?' .
-                'latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_hours=%d&past_hours=%d',
-                $lat, $lon, $hourly_sat, $tz, $forecast_hours, $past_hours
-            );
-            $sat = $this->fetchUrlJson($urlSat, 'primary');
-
-            // Wenn Satellite Daten liefert, aber ohne Temperatur → Forecast nachladen & MERGEN
-            if (is_array($sat) && !empty($sat['hourly']['time'])) {
-
-                // 1b) Minimaler Forecast-Call NUR für Temperatur/Cloud (Days-Parameter!)
-                $urlFc = sprintf(
-                    'https://api.open-meteo.com/v1/forecast?' .
-                    'latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_days=%d&past_days=%d',
-                    $lat, $lon, $hourly_fc, $tz, $fd_days, $pd_days
-                );
-                $fc = $this->fetchUrlJson($urlFc, 'merge-forecast');
-
-                // Falls Forecast auch da: per Zeitstempel zusammenführen
-                if (is_array($fc) && !empty($fc['hourly']['time'])) {
-                    // Map der Forecast-Zeitstempel -> Werte
-                    $t2mMap = [];
-                    $cldMap = [];
-                    $fcTimes = $fc['hourly']['time'];
-                    $fcT2m   = $fc['hourly']['temperature_2m'] ?? [];
-                    $fcCld   = $fc['hourly']['cloud_cover']    ?? [];
-                    $nFC = count($fcTimes);
-
-                    for ($i = 0; $i < $nFC; $i++) {
-                        $t = (string)$fcTimes[$i];
-                        if (isset($fcT2m[$i])) $t2mMap[$t] = $fcT2m[$i];
-                        if (isset($fcCld[$i])) $cldMap[$t] = $fcCld[$i];
-                    }
-
-                    // Ziel-Arrays in Satellite-JSON anlegen
-                    if (!isset($sat['hourly']['temperature_2m'])) $sat['hourly']['temperature_2m'] = [];
-                    if (!isset($sat['hourly']['cloud_cover']))    $sat['hourly']['cloud_cover']    = [];
-
-                    // Satellite liefert 1‑stündige Zeiten (Backward‑Average) → sollten zu Forecast-Zeiten passen
-                    $satTimes = $sat['hourly']['time'];
-                    $nSat = count($satTimes);
-
-                    for ($i = 0; $i < $nSat; $i++) {
-                        $ts = (string)$satTimes[$i];
-
-                        // exakter ISO‑Match (beide mit timezone=auto)
-                        $t2m = $t2mMap[$ts] ?? null;
-                        $cld = $cldMap[$ts] ?? null;
-
-                        // Falls kein exakter Match (z. B. 10‑min offset), versuche auf volle Stunde zu normalisieren
-                        if ($t2m === null || $cld === null) {
-                            // Round down to hour (lokale ISO)
-                            $tsHour = substr($ts, 0, 13) . ':00:00' . substr($ts, 19); // "YYYY-MM-DDTHH:00:00+XX:YY"
-                            if ($t2m === null && isset($t2mMap[$tsHour])) $t2m = $t2mMap[$tsHour];
-                            if ($cld === null && isset($cldMap[$tsHour])) $cld = $cldMap[$tsHour];
-                        }
-
-                        // Fallbacks (Temperatur braucht die PV‑Berechnung zwingend)
-                        if ($t2m === null) $t2m = 12.0;       // milder Default, wird i. d. R. überschrieben
-                        if ($cld === null) $cld = 0.0;
-
-                        $sat['hourly']['temperature_2m'][$i] = $t2m;
-                        $sat['hourly']['cloud_cover'][$i]    = $cld;
-                    }
-                }
-
-                // Ergebnis: Satellite mit gemergter Temperatur/Cloud
-                return $sat;
-            }
-
-            // Satellite leer → Fallback FORECAST (Days)
-            $urlFcFull = sprintf(
-                'https://api.open-meteo.com/v1/forecast?' .
-                'latitude=%F&longitude=%F&hourly=%s,%s&timezone=%s&forecast_days=%d&past_days=%d',
-                $lat, $lon,
-                // hier für Fallback die komplette Liste (Radiation + T2m/Cloud):
-                'shortwave_radiation,direct_radiation,diffuse_radiation,direct_normal_irradiance',
-                'temperature_2m,cloud_cover',
-                $tz, $fd_days, $pd_days
-            );
-            $raw2 = $this->fetchUrlJson($urlFcFull, 'fallback-forecast');
-            return (is_array($raw2) && !empty($raw2['hourly']['time'])) ? $raw2 : null;
-        }
-
-        // -------- 2) FORECAST-PRIME (Days) --------
         $url = sprintf(
-            'https://api.open-meteo.com/v1/forecast?' .
-            'latitude=%F&longitude=%F&hourly=%s,%s&timezone=%s&forecast_days=%d&past_days=%d',
-            $lat, $lon,
-            'shortwave_radiation,direct_radiation,diffuse_radiation,direct_normal_irradiance',
-            'temperature_2m,cloud_cover',
-            $tz, $fd_days, $pd_days
+            'https://api.open-meteo.com/v1/satellite?latitude=%F&longitude=%F&hourly=%s&timezone=%s&past_hours=%d&forecast_hours=%d',
+            $lat, $lon, $hourly, $tz, $past_hours, $forecast_hours
         );
 
-        $raw = $this->fetchUrlJson($url, 'forecast');
-        return (is_array($raw) && !empty($raw['hourly']['time'])) ? $raw : null;
+        $this->SendDebug('OpenMeteo URL [satellite]', $url, 0);
+        $sat = $this->fetchUrlJson($url, 'satellite');
+
+        if (is_array($sat) && !empty($sat['hourly']['time'])) {
+            $vars = implode(',', array_keys($sat['hourly'] ?? []));
+            $cnt  = count($sat['hourly']['time'] ?? []);
+            $this->SendDebug('OpenMeteo [satellite]', 'hourly='.$vars.' | Punkte='.$cnt, 0);
+            return $sat;
+        }
+        $this->SendDebug('OpenMeteo [satellite]', 'leer/ungültig', 0);
+        return null;
+    }
+
+    private function fetchForecastData(): ?array
+    {
+        $lat = (float)$this->ReadPropertyFloat('Latitude');
+        $lon = (float)$this->ReadPropertyFloat('Longitude');
+        $tz  = ($this->ReadPropertyString('Timezone') === 'auto') ? 'auto' : urlencode($this->ReadPropertyString('Timezone'));
+
+        $fd_days = max(1, min(16, (int)$this->ReadPropertyInteger('ForecastDays')));
+        $pd_days = max(0, min(7,  (int)$this->ReadPropertyInteger('PastDays')));
+
+        // Forecast: Radiation + Temperatur + Cloud
+        $hourly = 'shortwave_radiation,direct_radiation,diffuse_radiation,direct_normal_irradiance,temperature_2m,cloud_cover';
+
+        $url = sprintf(
+            'https://api.open-meteo.com/v1/forecast?latitude=%F&longitude=%F&hourly=%s&timezone=%s&forecast_days=%d&past_days=%d',
+            $lat, $lon, $hourly, $tz, $fd_days, $pd_days
+        );
+
+        $this->SendDebug('OpenMeteo URL [forecast]', $url, 0);
+        $fc = $this->fetchUrlJson($url, 'forecast');
+
+        if (is_array($fc) && !empty($fc['hourly']['time'])) {
+            $vars = implode(',', array_keys($fc['hourly'] ?? []));
+            $cnt  = count($fc['hourly']['time'] ?? []);
+            $hasDNI = isset(($fc['hourly'] ?? [])['direct_normal_irradiance']);
+            $this->SendDebug('OpenMeteo [forecast]', 'hourly='.$vars.' | Punkte='.$cnt, 0);
+            $this->SendDebug('OpenMeteo [forecast]', 'has direct_normal_irradiance = '.($hasDNI ? 'yes' : 'no'), 0);
+            return $fc;
+        }
+        $this->SendDebug('OpenMeteo [forecast]', 'leer/ungültig', 0);
+        return null;
     }
 
     private function fetchUrlJson(string $url, string $tag): ?array
     {
-        $this->SendDebug('OpenMeteo URL ['.$tag.']', $url, 0);
-        // robuster Abruf: bevorzugt Sys_GetURLContent (Symcon), sonst stream
+        // bevorzugt Symcon-Funktion
         if (function_exists('Sys_GetURLContent')) {
             $body = @Sys_GetURLContent($url);
         } else {
-            $ctx = stream_context_create(['http' => ['timeout' => 15]]);
+            $ctx = stream_context_create(['http' => ['timeout' => 20]]);
             $body = @file_get_contents($url, false, $ctx);
         }
         if ($body === false || $body === '') {
@@ -363,203 +293,297 @@ class OpenMeteoPV extends IPSModule
             $this->SendDebug('OpenMeteo ['.$tag.']', 'JSON ungültig', 0);
             return null;
         }
-        // Diagnose ins Debug
-        $vars = implode(',', array_keys($j['hourly'] ?? []));
-        $cnt  = count($j['hourly']['time'] ?? []);
-        $this->SendDebug('OpenMeteo ['.$tag.']', 'hourly='.$vars.' | Punkte='.$cnt, 0);
-        $hasDNI = isset(($j['hourly'] ?? [])['direct_normal_irradiance']);
-        $this->SendDebug('OpenMeteo ['.$tag.']', 'has direct_normal_irradiance = '.($hasDNI ? 'yes' : 'no'), 0);
         return $j;
     }
 
-    private function computeSatelliteNowcast(array $sat, array $fc, float $hours): array
+    /* ============================================================
+     *  NOWCASTING (Methode 2): Satellite-Trend + Forecast-Blending
+     * ============================================================ */
+
+    private function applySatelliteNowcast(array $sat, array $fc): array
     {
-        // Satellite & Forecast Zeitreihen prüfen
         if (empty($sat['hourly']['time']) ||
+            empty($fc['hourly']['time']) ||
             empty($sat['hourly']['shortwave_radiation']) ||
-            empty($sat['hourly']['direct_normal_irradiance']) ||
-            empty($fc['hourly']['time'])) {
+            empty($sat['hourly']['direct_normal_irradiance'])) {
             return $fc;
         }
 
-        $sat_time = $sat['hourly']['time'];
-        $ghi_sat  = $sat['hourly']['shortwave_radiation'];
-        $dni_sat  = $sat['hourly']['direct_normal_irradiance'];
+        $satT = $sat['hourly']['time'];
+        $ghiS = $sat['hourly']['shortwave_radiation'];
+        $dniS = $sat['hourly']['direct_normal_irradiance'];
+        $nS   = count($satT);
+        if ($nS < 2) return $fc;
 
-        $n = count($sat_time);
-        if ($n < 2) return $fc;   // mindestens zwei Satellite-Punkte nötig
+        $fcT  = $fc['hourly']['time'];
+        $ghiF = $fc['hourly']['shortwave_radiation'] ?? [];
+        $dniF = $fc['hourly']['direct_normal_irradiance'] ?? [];
+        $nF   = count($fcT);
+        if ($nF < 4) return $fc;
 
-        // === 1) Satellite-Trend (Now -1h → Now)
-        $ghi_now  = $ghi_sat[$n - 1];
-        $dni_now  = $dni_sat[$n - 1];
-        $ghi_prev = $ghi_sat[$n - 2];
-        $dni_prev = $dni_sat[$n - 2];
+        // letzter Satellitenpunkt: "jetzt" (~jetzt - 20..30 min)
+        $ghi_now = (float)$ghiS[$nS - 1];
+        $dni_now = (float)$dniS[$nS - 1];
 
-        // Änderungsrate pro Minute
+        // vorherige Stunde
+        $ghi_prev = (float)$ghiS[$nS - 2];
+        $dni_prev = (float)$dniS[$nS - 2];
+
+        // Trend/min
         $trend_ghi = ($ghi_now - $ghi_prev) / 60.0;
         $trend_dni = ($dni_now - $dni_prev) / 60.0;
 
-        // === 2) Zukunft t Minuten (variable Schiebezeit)
-        $t_minutes = $hours * 60.0;
+        // Zukunftshorizont
+        $nowH = max(0.5, min(6.0, (float)$this->ReadPropertyFloat('NowcastHours')));
+        $hLimit = min((int)ceil($nowH), $nF - 1);
 
-        // Aus Satellite extrapoliert
-        $ghi_sat_future = max(0.0, $ghi_now + $trend_ghi * $t_minutes);
-        $dni_sat_future = max(0.0, $dni_now + $trend_dni * $t_minutes);
+        $tau = 120.0; // min — Satellite dominiert 0–1h; Forecast übernimmt ab 2h zunehmend
 
-        // === 3) Forecast-Werte matchen
-        // Forecast index 1 = nächste Stunde
-        $ghi_fc_series = $fc['hourly']['shortwave_radiation'] ?? [];
-        $dni_fc_series = $fc['hourly']['direct_normal_irradiance'] ?? [];
+        for ($h = 1; $h <= $hLimit; $h++) {
+            $t_minutes = $h * 60.0;
 
-        if (count($ghi_fc_series) < 5 || count($dni_fc_series) < 5)
-            return $fc;
+            $ghi_sat = max(0.0, $ghi_now + $trend_ghi * $t_minutes);
+            $dni_sat = max(0.0, $dni_now + $trend_dni * $t_minutes);
 
-        // === 4) Exponentielle Gewichtung (Glättung)
-        // tau bestimmt, wie stark Satellite vs Forecast dominiert
-        $tau = 120.0; // 120 Minuten = gute Stabilität
-        $w   = exp(-$t_minutes / $tau);
+            $ghi_fc = (float)($ghiF[$h] ?? $ghi_now);
+            $dni_fc = (float)($dniF[$h] ?? $dni_now);
 
-        // === 5) Für die nächsten 4 Stunden anwenden
-        // h = 1..4 (Zukunftsstunden)
-        for ($h = 1; $h <= 4; $h++) {
+            $w = exp(-$t_minutes / $tau);
 
-            // Prognosezeit dieser Stunde
-            $t_h = $h * 60;  
-
-            // Satellite-Trend für h
-            $ghi_sat_h = max(0.0, $ghi_now + $trend_ghi * $t_h);
-            $dni_sat_h = max(0.0, $dni_now + $trend_dni * $t_h);
-
-            // Forecast
-            $ghi_fc_h = $ghi_fc_series[$h] ?? $ghi_now;
-            $dni_fc_h = $dni_fc_series[$h] ?? $dni_now;
-
-            // Gewicht für diese Stunde
-            $w_h = exp(-( $t_h / $tau ));
-
-            // Hybrid-Nowcast
-            $ghi_new = $w_h * $ghi_sat_h + (1 - $w_h) * $ghi_fc_h;
-            $dni_new = $w_h * $dni_sat_h + (1 - $w_h) * $dni_fc_h;
-
-            // einsetzen
-            $fc['hourly']['shortwave_radiation'][$h] = $ghi_new;
-            $fc['hourly']['direct_normal_irradiance'][$h] = $dni_new;
+            $ghiF[$h] = $w * $ghi_sat + (1.0 - $w) * $ghi_fc;
+            $dniF[$h] = $w * $dni_sat + (1.0 - $w) * $dni_fc;
         }
 
+        $fc['hourly']['shortwave_radiation']      = $ghiF;
+        $fc['hourly']['direct_normal_irradiance'] = $dniF;
         return $fc;
     }
 
+    /* ============================================================
+     *  PV-BERECHNUNG MIT NOWCAST-HYBRID
+     * ============================================================ */
     private function computePV(array $sat, array $fc): array
     {
-        // ============================================================
-        // 1) Zeitachsen
-        // ============================================================
-        if (empty($sat['hourly']['time']) || empty($fc['hourly']['time'])) {
-            return $this->computePV_Fallback($fc);
+        // Nowcasting aktiv?
+        if ((bool)$this->ReadPropertyBoolean('EnableNowcast') && $sat && !empty($sat['hourly']['time'])) {
+            $fc = $this->applySatelliteNowcast($sat, $fc);
         }
 
-        $sat_time = $sat['hourly']['time'];
-        $fc_time  = $fc['hourly']['time'];
-
-        $ghi_sat  = $sat['hourly']['shortwave_radiation'] ?? [];
-        $dni_sat  = $sat['hourly']['direct_normal_irradiance'] ?? [];
-
-        $ghi_fc   = $fc['hourly']['shortwave_radiation'] ?? [];
-        $dni_fc   = $fc['hourly']['direct_normal_irradiance'] ?? [];
-
-        $temp_fc  = $fc['hourly']['temperature_2m'] ?? [];
-        $dhi_fc   = $fc['hourly']['diffuse_radiation'] ?? [];
-
-        $nSat = count($sat_time);
-        $nFc  = count($fc_time);
-
-        if ($nSat < 2 || $nFc < 4) {
-            return $this->computePV_Fallback($fc);
+        // Forecast-Zeitachsen
+        if (empty($fc['hourly']['time'])) {
+            return $this->computePV_Fallback([]);
         }
 
-        // ============================================================
-        // 2) Schiebezeit (NowcastHours) – in Minuten
-        // ============================================================
-        $hours   = (float)$this->ReadPropertyFloat('NowcastHours');  // z.B. 4.0
-        $maxH    = min($hours, 6.0);                                 // Sicherung
-        $tFuture = $maxH * 60.0;                                     // in Minuten
+        $times = $fc['hourly']['time'];
+        $ghi   = $fc['hourly']['shortwave_radiation'] ?? [];
+        $dni   = $fc['hourly']['direct_normal_irradiance'] ?? [];
+        $dhi   = $fc['hourly']['diffuse_radiation'] ?? [];
+        $temp  = $fc['hourly']['temperature_2m'] ?? [];
 
-        // ============================================================
-        // 3) Satellite-Trend
-        //    letzter Punkt = "jetzt" (Satellite ~ now - 20..30min)
-        //    vorletzter Punkt = jetzt - 1h
-        // ============================================================
-        $ghi_now  = $ghi_sat[$nSat - 1];
-        $dni_now  = $dni_sat[$nSat - 1];
+        $n = min(count($times), count($ghi), count($dni));
+        if ($n === 0) return $this->computePV_Fallback([]);
 
-        $ghi_prev = $ghi_sat[$nSat - 2];
-        $dni_prev = $dni_sat[$nSat - 2];
+        // Sonnenposition (UTC-sicher)
+        $latRad = deg2rad((float)$this->ReadPropertyFloat('Latitude'));
+        $lonRad = deg2rad((float)$this->ReadPropertyFloat('Longitude'));
 
-        // Trend pro Minute
-        $trend_ghi = ($ghi_now - $ghi_prev) / 60.0;
-        $trend_dni = ($dni_now - $dni_prev) / 60.0;
-
-        // ============================================================
-        // 4) Zukunft (Satellite-Extrapolation) + Forecast-Blending
-        // ============================================================
-        // Zeitkonstante für exponenzielles Abklingen
-        $tau = 120.0;  // 120 min = Forecast übernimmt nach 2h schrittweise
-
-        // Für die nächsten +1h, +2h, +3h, +4h ... begrenzt durch NowcastHours
-        $hLimit = min( (int)ceil($maxH), $nFc - 1 );
-
-        for ($h = 1; $h <= $hLimit; $h++) {
-
-            $t_h = $h * 60.0;   // Minuten in der Zukunft
-
-            // Satellite-Extrapolation
-            $ghi_sat_h = max(0.0, $ghi_now + $trend_ghi * $t_h);
-            $dni_sat_h = max(0.0, $dni_now + $trend_dni * $t_h);
-
-            // Forecastwerte
-            $ghi_fc_h = $ghi_fc[$h] ?? $ghi_fc[$hLimit-1];
-            $dni_fc_h = $dni_fc[$h] ?? $dni_fc[$hLimit-1];
-
-            // Exponentielles Gewicht
-            $w = exp(-$t_h / $tau);  // 1.0 → 0.0
-
-            // Nowcast = Hybrid
-            $ghi_new = $w * $ghi_sat_h + (1 - $w) * $ghi_fc_h;
-            $dni_new = $w * $dni_sat_h + (1 - $w) * $dni_fc_h;
-
-            // Forecast überschreiben
-            $ghi_fc[$h] = $ghi_new;
-            $dni_fc[$h] = $dni_new;
+        $solar = [];
+        for ($i = 0; $i < $n; $i++) {
+            $dt = new DateTime($times[$i]);         // ISO mit Offset
+            $dt->setTimezone(new DateTimeZone('UTC'));
+            $solar[$i] = $this->solarPosApprox($dt->getTimestamp(), $latRad, $lonRad);
         }
 
-        // Ersetzen im Forecast-Dataset
-        $fc['hourly']['shortwave_radiation']       = $ghi_fc;
-        $fc['hourly']['direct_normal_irradiance']  = $dni_fc;
+        // Diagnose-Setup
+        $diagEnabled = (bool)$this->ReadPropertyBoolean('EnableDiagnostics');
+        $diagH0 = max(0, min(23, (int)$this->ReadPropertyInteger('DiagStartHour')));
+        $diagH1 = max(0, min(23, (int)$this->ReadPropertyInteger('DiagEndHour')));
 
-        // ============================================================
-        // 5) Berechnung der PV-Erträge (deine vorhandene Logik)
-        // ============================================================
-        // -> hier nutzt du weiterhin:
-        //    - GHI/DNI aus $fc
-        //    - DHI aus $fc
-        //    - temp aus $fc
-        //    - Solarpos, Mask, POA, NOCT
-        //    - Strings
-        // ============================================================
+        // Strings & Albedo
+        $arrays = $this->getArrays();
+        $albedo = (float)$this->ReadPropertyFloat('Albedo');
 
-        return $this->computePV_FinalFromDataset($fc);
+        // „Jetzt“-Index
+        $now = time();
+        $nowIdx = 0; $best = PHP_INT_MAX;
+        for ($i = 0; $i < $n; $i++) {
+            $d = abs(strtotime($times[$i]) - $now);
+            if ($d < $best) { $best = $d; $nowIdx = $i; }
+        }
+
+        $refDay = strtotime(substr($times[0], 0, 10));
+        $stringsOut = [];
+        $totalMap = [];
+        $sumToday = $sumTomorrow = $sumAfter = 0.0;
+
+        foreach ($arrays as $idx => $arr) {
+
+            $name  = (string)($arr['Name'] ?? ("Array_".$idx));
+            $ident = $this->arrayIdent($name, $idx);
+
+            $tilt = deg2rad((float)($arr['Tilt'] ?? 30));
+            $azM  = deg2rad(-(float)($arr['Azimuth'] ?? 0)); // 0=S, +90=W, -90=E → Maskenframe
+            $kWp  = (float)($arr['kWp'] ?? 1.0);
+            $loss = (float)($arr['LossFactor'] ?? 0.96);
+            $gamma= (float)($arr['Gamma'] ?? -0.004);
+            $NOCT = (float)($arr['NOCT'] ?? 45.0);
+            $inv  = (float)($arr['InverterLimit_kW'] ?? 0.0);
+            $mask = $this->parseHorizonMask($arr['HorizonMask'] ?? []);
+            $diffOb = (float)($arr['DiffuseObstruction'] ?? 1.0);
+
+            $series = [];
+            $diagRows = [];
+            $daily = [];
+            $now_w = 0.0;
+
+            for ($i = 0; $i < $n; $i++) {
+
+                $zen = $solar[$i]['zenith'];
+                $azs = $solar[$i]['azimuth'];
+
+                // Einfallswinkel
+                $cosT = $this->cosIncidence($tilt, $azM, $zen, $azs);
+                if ($cosT < 0) $cosT = 0.0;
+
+                // Maskenprüfung
+                $elSun = 90 - rad2deg($zen);
+                // Masken-Azimut: 0°=S, -90°=O, +90°=W (Vorzeichenwechsel!)
+                $azMaskDeg = fmod(( -rad2deg($azs) + 540.0), 360.0) - 180.0;
+                $hEl = $this->horizonElevation($mask, deg2rad($azMaskDeg));
+
+                $dni_eff = ($elSun < $hEl) ? 0.0 : ($dni[$i] ?? 0.0);
+                $dhi_eff = ($elSun < $hEl) ? (($dhi[$i] ?? 0.0) * $diffOb) : ($dhi[$i] ?? 0.0);
+
+                // POA (W/m², stündlich)
+                $poa = $dni_eff * $cosT
+                     + $dhi_eff * (1 + cos($tilt)) / 2
+                     + ($ghi[$i] ?? 0.0) * $albedo * (1 - cos($tilt)) / 2;
+
+                if ($poa < 0) $poa = 0.0;
+
+                // Zelltemperatur (NOCT, W/m²)
+                $tcell = ($temp[$i] ?? 20.0) + ($NOCT - 20.0)/800.0 * $poa;
+
+                // Energie (kWh) pro Stunde
+                $e_kwh = $kWp * ($poa / 1000.0) * $loss * (1 + $gamma * ($tcell - 25.0));
+                if ($e_kwh < 0) $e_kwh = 0.0;
+
+                // Leistung (W)
+                $pW = $e_kwh * 1000.0; // 1h Mittelwert
+                if ($inv > 0 && $pW > $inv * 1000.0) {
+                    $pW = $inv * 1000.0;
+                    $e_kwh = $inv * 1.0; // 1h * inv[kW]
+                }
+
+                // Debug am Now-Index
+                if ($i === $nowIdx) {
+                    $this->SendDebug('SUN', sprintf('[%s] t=%s | elev=%.1f° | cosZ=%.3f', $name, $times[$i], 90 - rad2deg($zen), cos($zen)), 0);
+                    $this->SendDebug('MASK', sprintf('[%s] t=%s | azMask=%.1f° | hEl=%.1f° | elSun=%.1f°', $name, $times[$i], $azMaskDeg, $hEl, $elSun), 0);
+                }
+
+                // „Jetzt“
+                if ($i === $nowIdx) $now_w = $pW;
+
+                // Diagnose-Logging im Fenster
+                if ($diagEnabled) {
+                    $dtLocal = new DateTime($times[$i]); // ISO enthält Offset
+                    $hourLocal = (int)$dtLocal->format('G');
+                    $todayLocal = (new DateTime('now', $dtLocal->getTimezone()))->format('Y-m-d');
+                    $dateLocal  = $dtLocal->format('Y-m-d');
+                    if ($dateLocal === $todayLocal && $hourLocal >= $diagH0 && $hourLocal <= $diagH1) {
+                        $diagRows[] = [
+                            't'         => $times[$i],
+                            'azMask'    => round($azMaskDeg, 1),
+                            'hEl'       => round($hEl, 1),
+                            'elSun'     => round($elSun, 1),
+                            'dni_eff_W' => round($dni_eff, 1),
+                            'dhi_W'     => round($dhi_eff, 1),
+                            'cosT'      => round($cosT, 3),
+                            'poa_W'     => round($poa, 1),
+                            'p_W'       => (int)round($pW),
+                            'shaded'    => ($elSun < $hEl)
+                        ];
+                    }
+                }
+
+                // Tageskörbe
+                $dayTs = strtotime(substr($times[$i], 0, 10));
+                $off = (int)(($dayTs - $refDay) / 86400);
+                if (!isset($daily[$off])) $daily[$off] = 0.0;
+                $daily[$off] += $e_kwh;
+
+                // Serie
+                $series[] = [
+                    't'   => $times[$i],
+                    'p_w' => (int)round($pW),
+                    'e_kwh' => $e_kwh
+                ];
+
+                // Gesamt
+                $totalMap[$times[$i]] = ($totalMap[$times[$i]] ?? 0) + (int)round($pW);
+            }
+
+            $stringsOut[$ident] = [
+                'now_w'     => $now_w,
+                'today_kwh' => $daily[0] ?? 0.0,
+                'json'      => $series,
+                'horizon'   => $mask,
+                'diag'      => $diagRows
+            ];
+
+            $sumToday    += $daily[0] ?? 0.0;
+            $sumTomorrow += $daily[1] ?? 0.0;
+            $sumAfter    += $daily[2] ?? 0.0;
+        }
+
+        // Gesamtzeitreihe sortieren
+        ksort($totalMap);
+        $jsonTotal = [];
+        foreach ($totalMap as $t => $p) {
+            $jsonTotal[] = ['t' => $t, 'p_w' => $p];
+        }
+
+        // Rückgabe
+        // total_power_now_w = Summe aller Strings „jetzt“
+        $total_now_w = 0.0;
+        foreach ($stringsOut as $s) $total_now_w += $s['now_w'];
+
+        return [
+            'total_power_now_w' => $total_now_w,
+            'daily' => [
+                '0' => $sumToday,
+                '1' => $sumTomorrow,
+                '2' => $sumAfter
+            ],
+            'strings'   => $stringsOut,
+            'json_total'=> $jsonTotal
+        ];
     }
 
-    private function findNowIndex(array $times): int
+    private function computePV_Fallback(array $fc): array
     {
-        $now = time();
-        $best = 0; $bestDiff = PHP_INT_MAX;
-        foreach ($times as $i => $iso) {
-            $ts = strtotime($iso);
-            $d = abs($ts - $now);
-            if ($d < $bestDiff) { $bestDiff = $d; $best = $i; }
-        }
-        return $best;
+        return [
+            'total_power_now_w' => 0,
+            'daily' => ['0'=>0.0, '1'=>0.0, '2'=>0.0],
+            'strings' => [],
+            'json_total' => []
+        ];
+    }
+
+    /* ============================================================
+     *  HELPERS
+     * ============================================================ */
+
+    private function getArrays(): array
+    {
+        $a = json_decode($this->ReadPropertyString('Arrays'), true);
+        return is_array($a) ? $a : [];
+    }
+
+    private function arrayIdent(string $name, int $idx): string
+    {
+        $base = preg_replace('/[^A-Za-z0-9_]/', '_', $name);
+        return strtoupper($base).'_'.$idx;
     }
 
     private function parseHorizonMask($maskField): array
@@ -575,7 +599,7 @@ class OpenMeteoPV extends IPSModule
     {
         if (count($mask) < 2) return 0.0;
 
-        // Masken-Azimutwerte in [-180°, +180°) normalisieren
+        // Normalisieren
         foreach ($mask as &$pt) {
             $az = (float)$pt['az'];
             $az = fmod(($az + 540.0), 360.0) - 180.0;
@@ -583,7 +607,7 @@ class OpenMeteoPV extends IPSModule
         }
         unset($pt);
 
-        // Sonnen-Azimut (in Grad) aus Eingabe und normalisieren
+        // Sonnen-Azimut in Grad/normalisiert
         $az = rad2deg($azimuthRad);
         $az = fmod(($az + 540.0), 360.0) - 180.0;
 
@@ -600,7 +624,7 @@ class OpenMeteoPV extends IPSModule
             }
             $prev = $pt;
         }
-        // Wrap-around (letzter -> erster)
+        // Wrap-around
         $first = $mask[0];
         $x0 = (float)$prev['az'];   $y0 = (float)$prev['el'];
         $x1 = (float)$first['az'] + 360.0; $y1 = (float)$first['el'];
@@ -611,9 +635,11 @@ class OpenMeteoPV extends IPSModule
 
     private function cosIncidence(float $tilt, float $aziM, float $zenith, float $aziSun): float
     {
+        // Modulnormalenvektor
         $nx = sin($tilt) * cos($aziM);
         $ny = sin($tilt) * sin($aziM);
         $nz = cos($tilt);
+        // Sonnenvektor
         $sx = sin($zenith) * cos($aziSun);
         $sy = sin($zenith) * sin($aziSun);
         $sz = cos($zenith);
@@ -622,8 +648,7 @@ class OpenMeteoPV extends IPSModule
 
     private function solarPosApprox(int $tsUTC, float $lat, float $lon): array
     {
-        // vereinfachte Sonnenstandsberechnung (ausreichend für Forecast-Zwecke)
-        // Referenz: 2000-01-01 12:00:00 UTC (946728000)
+        // Referenz J2000 12:00 UTC (946728000)
         $d = ($tsUTC - 946728000) / 86400.0;
         $L = deg2rad(fmod(280.46 + 0.9856474 * $d, 360.0));
         $g = deg2rad(fmod(357.528 + 0.9856003 * $d, 360.0));
@@ -631,19 +656,19 @@ class OpenMeteoPV extends IPSModule
         $epsilon = deg2rad(23.439 - 0.0000004 * $d);
         $RA = atan2(cos($epsilon)*sin($lambda), cos($lambda));
         $dec = asin(sin($epsilon)*sin($lambda));
-        // Greenwich Mean Sidereal Time in Stunden
         $GMST = fmod(18.697374558 + 24.06570982441908 * $d, 24.0);
-        // Local Sidereal Time (Radiant)
         $LST = deg2rad(($GMST * 15.0)) + $lon;
-        $HA = $LST - $RA; // Stundenwinkel
-        // Horizontal-Koordinaten
+        $HA = $LST - $RA;
+
         $x = cos($HA)*cos($dec);
         $y = sin($HA)*cos($dec);
         $z = sin($dec);
+
         $xhor = $x * sin($lat) - $z * cos($lat);
         $yhor = $y;
         $zhor = $x * cos($lat) + $z * sin($lat);
-        $azimuth = atan2($yhor, $xhor) + M_PI; // 0..2π, 0=Süden
+
+        $azimuth = atan2($yhor, $xhor) + M_PI; // 0..2π, 0=S
         $zenith  = acos($zhor);
         return ['zenith' => $zenith, 'azimuth' => $azimuth];
     }
