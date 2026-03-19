@@ -301,101 +301,69 @@ class OpenMeteoPV extends IPSModule
     /* ============================================================
      *  NOWCASTING (Methode 2): Satellite-Trend + Forecast-Blending
      * ============================================================ */
-
-    private function applySatelliteNowcast(array $sat, array $fc): array
+    private function applySatelliteNowcast_Archive(array $combined): array
     {
-        // Grundchecks
-        if (empty($sat['hourly']['time']) ||
-            empty($fc['hourly']['time']) ||
-            empty($sat['hourly']['shortwave_radiation']) ||
-            empty($sat['hourly']['direct_normal_irradiance'])) {
-            return $fc;
+        // mindestens 4 Punkte notwendig
+        if (count($combined) < 4) {
+            return $combined;
         }
 
-        $satT = $sat['hourly']['time'];
-        $ghiS = $sat['hourly']['shortwave_radiation'];
-        $dniS = $sat['hourly']['direct_normal_irradiance'];
-        $nS = count($satT);
+        // Trend aus den letzten 3 Satellitenpunkten
+        $n = count($combined);
 
-        if ($nS < 3)
-            return $fc;
+        // letzte 3 Punkte (Archiv)
+        $ghi_now   = $combined[$n-1]['ghi'];
+        $ghi_p1    = $combined[$n-2]['ghi'];
+        $ghi_p2    = $combined[$n-3]['ghi'];
 
-        $fcT  = $fc['hourly']['time'];
-        $ghiF = $fc['hourly']['shortwave_radiation'] ?? [];
-        $dniF = $fc['hourly']['direct_normal_irradiance'] ?? [];
-        $nF = count($fcT);
+        $dni_now   = $combined[$n-1]['dni'];
+        $dni_p1    = $combined[$n-2]['dni'];
+        $dni_p2    = $combined[$n-3]['dni'];
 
-        if ($nF < 4)
-            return $fc;
+        // Trend
+        $trend_ghi = (($ghi_now - $ghi_p1) + ($ghi_p1 - $ghi_p2)) / 2.0;
+        $trend_dni = (($dni_now - $dni_p1) + ($dni_p1 - $dni_p2)) / 2.0;
 
-        /*
-            Open-Meteo liefert Wh/m² pro Stunde. Für Trend-Berechnung
-            benötigen wir W/m², daher: Wh/h = W
-        */
+        // Trendlimit
+        $maxT = 400;
+        $trend_ghi = max(-$maxT, min($maxT, $trend_ghi));
+        $trend_dni = max(-$maxT, min($maxT, $trend_dni));
 
-        // kleine Mittelung für stabileren Trend
-        $ghi_now = (float)$ghiS[$nS - 1];
-        $ghi_prev1 = (float)$ghiS[$nS - 2];
-        $ghi_prev2 = (float)$ghiS[$nS - 3];
-
-        $dni_now = (float)$dniS[$nS - 1];
-        $dni_prev1 = (float)$dniS[$nS - 2];
-        $dni_prev2 = (float)$dniS[$nS - 3];
-
-        // Durchschnitt aus 2 Schritten
-        $trend_ghi = (($ghi_now - $ghi_prev1) + ($ghi_prev1 - $ghi_prev2)) / 2.0;
-        $trend_dni = (($dni_now - $dni_prev1) + ($dni_prev1 - $dni_prev2)) / 2.0;
-
-        // Maximal erlaubte Trendstärke (Sicherheitslimit)
-        $maxTrend = 400;  // Wh Änderung pro Stunde
-        $trend_ghi = max(-$maxTrend, min($maxTrend, $trend_ghi));
-        $trend_dni = max(-$maxTrend, min($maxTrend, $trend_dni));
-
-        // Zukunftshorizont
+        // Nowcast-Zeithorizont
         $nowH = max(0.5, min(6.0, (float)$this->ReadPropertyFloat('NowcastHours')));
-        $hLimit = min((int)ceil($nowH), $nF - 1);
+        $limit = min((int)ceil($nowH), $n-1);
 
-        // Zeitkonstante für blending
-        $tau = 120.0; // Minuten
+        // Zeitkonstante (Blending)
+        $tau = 120.0;
 
-        for ($h = 1; $h <= $hLimit; $h++) {
+        // Nowcast anwenden NUR auf Zukunftspunkte
+        for ($h = 1; $h <= $limit; $h++) {
 
-            // Extrapolation: da Wh/h = W, zeitliche Skalierung entfällt
-            // (keine /60 oder *60 Fehler!)
-            $ghi_sat = max(0.0, $ghi_now + $trend_ghi * $h);
-            $dni_sat = max(0.0, $dni_now + $trend_dni * $h);
+            $idx = $n - 1 + $h;
+            if (!isset($combined[$idx])) break;
 
-            $ghi_fc = (float)($ghiF[$h] ?? $ghi_now);
-            $dni_fc = (float)($dniF[$h] ?? $dni_now);
+            // Extrapolation
+            $ghi_sat = max(0, $ghi_now + $trend_ghi * $h);
+            $dni_sat = max(0, $dni_now + $trend_dni * $h);
 
-            // Blendinggewicht
-            $t_minutes = $h * 60.0;
-            $w = exp(-$t_minutes / $tau);
+            $ghi_fc = $combined[$idx]['ghi'];
+            $dni_fc = $combined[$idx]['dni'];
 
-            // Nowcast mischen
-            $ghi_new = $w * $ghi_sat + (1.0 - $w) * $ghi_fc;
-            $dni_new = $w * $dni_sat + (1.0 - $w) * $dni_fc;
+            // Gewicht (Decay)
+            $w = exp(-( $h*60 ) / $tau);
 
-            // Limits gegen Overshooting
-            $ghi_max = max($ghi_fc * 1.4, $ghi_fc + 100);
-            $dni_max = max($dni_fc * 1.4, $dni_fc + 100);
+            $ghi_new = $w * $ghi_sat + (1-$w) * $ghi_fc;
+            $dni_new = $w * $dni_sat + (1-$w) * $dni_fc;
 
-            $ghi_new = min($ghi_new, $ghi_max);
-            $dni_new = min($dni_new, $dni_max);
+            // Overshoot-Schutz
+            $ghi_new = min($ghi_new, max($ghi_fc*1.4, $ghi_fc+100));
+            $dni_new = min($dni_new, max($dni_fc*1.4, $dni_fc+100));
 
-            // Negative Werte verhindern
-            $ghi_new = max(0.0, $ghi_new);
-            $dni_new = max(0.0, $dni_new);
-
-            // speichern
-            $ghiF[$h] = $ghi_new;
-            $dniF[$h] = $dni_new;
+            $combined[$idx]['ghi'] = max(0, $ghi_new);
+            $combined[$idx]['dni'] = max(0, $dni_new);
         }
 
-        $fc['hourly']['shortwave_radiation'] = $ghiF;
-        $fc['hourly']['direct_normal_irradiance'] = $dniF;
-
-        return $fc;
+        return $combined;
     }
 
     /* ============================================================
@@ -403,323 +371,68 @@ class OpenMeteoPV extends IPSModule
      * ============================================================ */
     private function computePV(?array $sat, array $fc): array
     {
-        // --- Transition-Zeitpunkt bestimmen (JETZT) ---
-        $nowISO = (new DateTime('now', new DateTimeZone('UTC')))->format('Y-m-d\TH:i:00\Z');    
+        // ---- 1) Zeit JETZT in ISO-UTC ----
+        $nowISO = (new DateTime('now', new DateTimeZone('UTC')))
+            ->format('Y-m-d\TH:i:00\Z');
 
-        // Falls Satellite fehlt → Forecast-only
+        // ---- 2) Archiv + Forecast fehlend -> Fallback ----
         if ($sat === null || empty($sat['hourly']['time'])) {
-            $this->SendDebug('Nowcasting', 'Satellite-Daten fehlen → Forecast-only', 0);
+            $this->SendDebug('Nowcasting', 'Keine Satellitendaten → Forecast-only', 0);
             return $this->computePV_ForecastOnly($fc);
         }
-    
-        // Nowcasting aktiv?
-        if ($sat !== null 
-            && !empty($sat['hourly']['time'])
-            && (bool)$this->ReadPropertyBoolean('EnableNowcast')) 
-        {
-            $this->SendDebug('Nowcasting', 'Nowcast aktiv', 0);
-            $fc = $this->applySatelliteNowcast($sat, $fc);
-        }
 
-
-        // Forecast-Zeitachsen
-        if (empty($fc['hourly']['time'])) {
-            return $this->computePV_Fallback([]);
-        }
-
-        // --- FORECAST filtern: nur Zukunft ab jetzt ---
-        $fcst = [];
-        for ($i = 0; $i < count($fc['hourly']['time']); $i++) {
-            if ($fc['hourly']['time'][$i] >= $nowISO) {
-                $fcst[] = [
-                    't' => $fc['hourly']['time'][$i],
-                    'ghi' => $fc['hourly']['shortwave_radiation'][$i] ?? 0,
-                    'dni' => $fc['hourly']['direct_normal_irradiance'][$i] ?? 0,
-                    'dhi' => $fc['hourly']['diffuse_radiation'][$i] ?? 0,
-                    'temp' => $fc['hourly']['temperature_2m'][$i] ?? 0,
-                ];
-            }
-        }
-
-        // Schritt 1: Archiv‑Zeitstempel extrahieren
-        // Schritt 2: Forecast‑Zeitstempel extrahieren
-        // Schritt 3: Beide Zeitreihen zusammenführen
-        if (!empty($sat['hourly']['time'])) {
-            // --- ARCHIV filtern: nur Vergangenheit bis jetzt ---
-            $arch = [];
-            for ($i = 0; $i < count($sat['hourly']['time']); $i++) {
-                if ($sat['hourly']['time'][$i] < $nowISO) {
-                    $arch[] = [
-                        't' => $sat['hourly']['time'][$i],
-                        'ghi' => $sat['hourly']['shortwave_radiation'][$i] ?? 0,
-                        'dni' => $sat['hourly']['direct_normal_irradiance'][$i] ?? 0,
-                        'dhi' => $sat['hourly']['diffuse_radiation'][$i] ?? 0,
-                    ];
-                }
-            }
-
-            // Archivdaten ergänzen
-            /*
-            $fc['hourly']['shortwave_radiation'] = array_merge(
-                $sat['hourly']['shortwave_radiation'] ?? [],
-                $fc['hourly']['shortwave_radiation'] ?? []
-            );
-
-            $fc['hourly']['direct_normal_irradiance'] = array_merge(
-                $sat['hourly']['direct_normal_irradiance'] ?? [],
-                $fc['hourly']['direct_normal_irradiance'] ?? []
-            );
-
-            $fc['hourly']['diffuse_radiation'] = array_merge(
-                $sat['hourly']['diffuse_radiation'] ?? [],
-                $fc['hourly']['diffuse_radiation'] ?? []
-            );
-
-            $fc['hourly']['time'] = array_merge(
-                $sat['hourly']['time'] ?? [],
-                $fc['hourly']['time'] ?? []
-            );*/
-            $combined = array_merge($arch, $fcst);
-
-            // --- Zeitreihe sortieren ---
-            /*
-            $combined = [];
-            for ($i = 0; $i < count($fc['hourly']['time']); $i++) {
-                $combined[] = [
-                    't' => $fc['hourly']['time'][$i],
-                    'ghi' => $fc['hourly']['shortwave_radiation'][$i] ?? 0,
-                    'dni' => $fc['hourly']['direct_normal_irradiance'][$i] ?? 0,
-                    'dhi' => $fc['hourly']['diffuse_radiation'][$i] ?? 0,
-                    'temp' => $fc['hourly']['temperature_2m'][$i] ?? 0,
-                ];
-            }*/
-
-            // Sortieren nach Zeit
-            usort($combined, fn($a, $b) => strcmp($a['t'], $b['t']));
-
-            // Duplikate entfernen
-            $clean = [];
-            $lastT = '';
-            foreach ($combined as $row) {
-                if ($row['t'] === $lastT) continue;
-                $clean[] = $row;
-                $lastT = $row['t'];
-            }
-
-            // Zurückschreiben
-            $fc['hourly']['time'] = array_column($clean, 't');
-            $fc['hourly']['shortwave_radiation'] = array_column($clean, 'ghi');
-            $fc['hourly']['direct_normal_irradiance'] = array_column($clean, 'dni');
-            $fc['hourly']['diffuse_radiation'] = array_column($clean, 'dhi');
-            $fc['hourly']['temperature_2m'] = array_column($clean, 'temp');
-        }
-
-
-        $times = $fc['hourly']['time'];
-        $ghi   = $fc['hourly']['shortwave_radiation'] ?? [];
-        $dni   = $fc['hourly']['direct_normal_irradiance'] ?? [];
-        $dhi   = $fc['hourly']['diffuse_radiation'] ?? [];
-        $temp  = $fc['hourly']['temperature_2m'] ?? [];
-
-        $n = min(count($times), count($ghi), count($dni));
-        if ($n === 0) return $this->computePV_Fallback([]);
-
-        // Sonnenposition (UTC-sicher)
-        $latRad = deg2rad((float)$this->ReadPropertyFloat('Latitude'));
-        $lonRad = deg2rad((float)$this->ReadPropertyFloat('Longitude'));
-
-        $solar = [];
-        for ($i = 0; $i < $n; $i++) {
-            $dt = new DateTime($times[$i]);         // ISO mit Offset
-            $dt->setTimezone(new DateTimeZone('UTC'));
-            $solar[$i] = $this->solarPosApprox($dt->getTimestamp(), $latRad, $lonRad);
-        }
-
-        // Diagnose-Setup
-        $diagEnabled = (bool)$this->ReadPropertyBoolean('EnableDiagnostics');
-        $diagH0 = max(0, min(23, (int)$this->ReadPropertyInteger('DiagStartHour')));
-        $diagH1 = max(0, min(23, (int)$this->ReadPropertyInteger('DiagEndHour')));
-
-        // Strings & Albedo
-        $arrays = $this->getArrays();
-        $albedo = (float)$this->ReadPropertyFloat('Albedo');
-
-        // „Jetzt“-Index
-        $now = time();
-        $nowIdx = 0; $best = PHP_INT_MAX;
-        for ($i = 0; $i < $n; $i++) {
-            $d = abs(strtotime($times[$i]) - $now);
-            if ($d < $best) { $best = $d; $nowIdx = $i; }
-        }
-
-        $refDay = strtotime(substr($times[0], 0, 10));
-        $stringsOut = [];
-        $totalMap = [];
-        $sumToday = $sumTomorrow = $sumAfter = 0.0;
-
-        foreach ($arrays as $idx => $arr) {
-
-            $name  = (string)($arr['Name'] ?? ("Array_".$idx));
-            $ident = $this->arrayIdent($name, $idx);
-
-            $tilt = deg2rad((float)($arr['Tilt'] ?? 30));
-            $azM  = deg2rad(-(float)($arr['Azimuth'] ?? 0)); // 0=S, +90=W, -90=E → Maskenframe
-            $kWp  = (float)($arr['kWp'] ?? 1.0);
-            $loss = (float)($arr['LossFactor'] ?? 0.96);
-            $gamma= (float)($arr['Gamma'] ?? -0.004);
-            $NOCT = (float)($arr['NOCT'] ?? 45.0);
-            $inv  = (float)($arr['InverterLimit_kW'] ?? 0.0);
-            $mask = $this->parseHorizonMask($arr['HorizonMask'] ?? []);
-            $diffOb = (float)($arr['DiffuseObstruction'] ?? 1.0);
-
-            $series = [];
-            $diagRows = [];
-            $daily = [];
-            $now_w = 0.0;
-
-            for ($i = 0; $i < $n; $i++) {
-
-                $zen = $solar[$i]['zenith'];
-                $azs = $solar[$i]['azimuth'];
-
-                // --- Zeitdelta bestimmen (dt_hours) ---
-                $t0 = strtotime($times[$i]);
-                if ($i + 1 < $n) {
-                    $t1 = strtotime($times[$i + 1]);
-                } else {
-                    // Fallback: 1h, wenn letzter Eintrag
-                    $t1 = $t0 + 3600;
-                }
-                $dt_hours = max(0.016, ($t1 - $t0) / 3600.0);  // min 1 Minute Schutz
-
-                // Einfallswinkel
-                $cosT = $this->cosIncidence($tilt, $azM, $zen, $azs);
-                if ($cosT < 0) $cosT = 0.0;
-
-                // Maskenprüfung
-                $elSun = 90 - rad2deg($zen);
-                // Masken-Azimut: 0°=S, -90°=O, +90°=W (Vorzeichenwechsel!)
-                $azMaskDeg = fmod(( -rad2deg($azs) + 540.0), 360.0) - 180.0;
-                $hEl = $this->horizonElevation($mask, deg2rad($azMaskDeg));
-
-                $dni_eff = ($elSun < $hEl) ? 0.0 : ($dni[$i] ?? 0.0);
-                $dhi_eff = ($elSun < $hEl) ? (($dhi[$i] ?? 0.0) * $diffOb) : ($dhi[$i] ?? 0.0);
-
-                // --- Strahlungsdaten korrekt als W/m² (Mittelwert) interpretieren ---
-                $GHI = (float)($ghi[$i] ?? 0.0);        // Global Horizontal Irradiance
-                $DNI = (float)($dni[$i] ?? 0.0);        // Direkt Normal
-                $DHI = (float)($dhi[$i] ?? 0.0);        // Diffus
-
-                // Maskenfilter
-                $DNI_eff = $dni_eff; // bereits korrekt: 0 bei Schatten
-                $DHI_eff = $dhi_eff;
-
-                // --- POA (Plane-of-Array Irradiance) korrekt nach PVGIS/ISO ---
-                $poa_beam    = $DNI_eff * $cosT;                        // Direkt zur Modulfläche
-                $poa_diffuse = $DHI_eff * (1 + cos($tilt)) * 0.5;       // Himmel halbseitig
-                $poa_ground  = $GHI * $albedo * (1 - cos($tilt)) * 0.5; // Bodenreflexion
-
-                $poa = $poa_beam + $poa_diffuse + $poa_ground;
-
-                if ($poa < 0) $poa = 0.0;
-
-                // Zelltemperatur (NOCT, W/m²)
-                $tcell = ($temp[$i] ?? 20.0) + ($NOCT - 20.0)/800.0 * $poa;
-
-                // Energie (kWh) pro Stunde
-                $e_kwh = $kWp * ($poa / 1000.0) * $loss * (1 + $gamma * ($tcell - 25.0)) * $dt_hours;
-                if ($e_kwh < 0) $e_kwh = 0.0;
-
-                // Leistung (W)
-                //$pW = $e_kwh * 1000.0; // 1h Mittelwert
-                $pW = ($dt_hours > 0 ? ($e_kwh / $dt_hours) * 1000.0 : 0);
-                if ($inv > 0 && $pW > $inv * 1000.0) {
-                    $pW = $inv * 1000.0;
-                    $e_kwh = $inv * 1.0; // 1h * inv[kW]
-                }
-
-                // Debug am Now-Index
-                if ($i === $nowIdx) {
-                    $this->SendDebug('SUN', sprintf('[%s] t=%s | elev=%.1f° | cosZ=%.3f', $name, $times[$i], 90 - rad2deg($zen), cos($zen)), 0);
-                    $this->SendDebug('MASK', sprintf('[%s] t=%s | azMask=%.1f° | hEl=%.1f° | elSun=%.1f°', $name, $times[$i], $azMaskDeg, $hEl, $elSun), 0);
-                }
-
-                // „Jetzt“
-                if ($i === $nowIdx) $now_w = $pW;
-
-                // Diagnose-Logging im Fenster
-                if ($diagEnabled) {
-                    $dtLocal = new DateTime($times[$i]); // ISO enthält Offset
-                    $hourLocal = (int)$dtLocal->format('G');
-                    $todayLocal = (new DateTime('now', $dtLocal->getTimezone()))->format('Y-m-d');
-                    $dateLocal  = $dtLocal->format('Y-m-d');
-                    if ($dateLocal === $todayLocal && $hourLocal >= $diagH0 && $hourLocal <= $diagH1) {
-                        $diagRows[] = [
-                            't'         => $times[$i],
-                            'azMask'    => round($azMaskDeg, 1),
-                            'hEl'       => round($hEl, 1),
-                            'elSun'     => round($elSun, 1),
-                            'dni_eff_W' => round($dni_eff, 1),
-                            'dhi_W'     => round($dhi_eff, 1),
-                            'cosT'      => round($cosT, 3),
-                            'poa_W'     => round($poa, 1),
-                            'p_W'       => (int)round($pW),
-                            'shaded'    => ($elSun < $hEl)
-                        ];
-                    }
-                }
-
-                // Tageskörbe
-                $off = $this->dayIndexDSTSafe($times[$i], $times[0]);
-                if (!isset($daily[$off])) $daily[$off] = 0.0;
-                $daily[$off] += $e_kwh;
-
-                // Serie
-                $series[] = [
-                    't'   => $times[$i],
-                    'p_w' => (int)round($pW),
-                    'e_kwh' => $e_kwh
-                ];
-
-                // Gesamt
-                $totalMap[$times[$i]] = ($totalMap[$times[$i]] ?? 0) + (int)round($pW);
-            }
-
-            $stringsOut[$ident] = [
-                'now_w'     => $now_w,
-                'today_kwh' => $daily[0] ?? 0.0,
-                'json'      => $series,
-                'horizon'   => $mask,
-                'diag'      => $diagRows
+        // ---- 3) ARCHIV in ein einheitliches Array konvertieren ----
+        $arch = [];
+        for ($i = 0; $i < count($sat['hourly']['time']); $i++) {
+            $arch[] = [
+                't'   => $sat['hourly']['time'][$i],
+                'ghi' => $sat['hourly']['shortwave_radiation'][$i] ?? 0,
+                'dni' => $sat['hourly']['direct_normal_irradiance'][$i] ?? 0,
+                'dhi' => $sat['hourly']['diffuse_radiation'][$i] ?? 0,
+                'temp'=> null   // Archiv hat keine Temp
             ];
-
-            $sumToday    += $daily[0] ?? 0.0;
-            $sumTomorrow += $daily[1] ?? 0.0;
-            $sumAfter    += $daily[2] ?? 0.0;
         }
 
-        // Gesamtzeitreihe sortieren
-        ksort($totalMap);
-        $jsonTotal = [];
-        foreach ($totalMap as $t => $p) {
-            $jsonTotal[] = ['t' => $t, 'p_w' => $p];
+        // ---- 4) FORECAST ab Jetzt ----
+        $fcst = [];
+        if (!empty($fc['hourly']['time'])) {
+            for ($i = 0; $i < count($fc['hourly']['time']); $i++) {
+
+                if ($fc['hourly']['time'][$i] < $nowISO)
+                    continue;
+
+                $fcst[] = [
+                    't'   => $fc['hourly']['time'][$i],
+                    'ghi' => $fc['hourly']['shortwave_radiation'][$i] ?? 0,
+                    'dni' => $fc['hourly']['direct_normal_irradiance'][$i] ?? 0,
+                    'dhi' => $fc['hourly']['diffuse_radiation'][$i] ?? 0,
+                    'temp'=> $fc['hourly']['temperature_2m'][$i] ?? 0
+                ];
+            }
         }
 
-        // Rückgabe
-        // total_power_now_w = Summe aller Strings „jetzt“
-        $total_now_w = 0.0;
-        foreach ($stringsOut as $s) $total_now_w += $s['now_w'];
+        // ---- 5) ARCHIV + FORECAST MERGEN ----
+        $combined = array_merge($arch, $fcst);
 
-        return [
-            'total_power_now_w' => $total_now_w,
-            'daily' => [
-                '0' => $sumToday,
-                '1' => $sumTomorrow,
-                '2' => $sumAfter
-            ],
-            'strings'   => $stringsOut,
-            'json_total'=> $jsonTotal
-        ];
+        // ---- 6) Sortieren ----
+        usort($combined, fn($a, $b) => strcmp($a['t'], $b['t']));
+
+        // ---- 7) Nowcasting (Archiv-Trend) ----
+        if ((bool)$this->ReadPropertyBoolean('EnableNowcast')) {
+            $this->SendDebug("Nowcasting", "Aktiv – wende applySatelliteNowcast_Archive() an", 0);
+            $combined = $this->applySatelliteNowcast_Archive($combined);
+        }
+
+        // ---- 8) Zurückschreiben in Forecast-Struktur ----
+        $fc['hourly']['time'] = array_column($combined, 't');
+        $fc['hourly']['shortwave_radiation']   = array_column($combined, 'ghi');
+        $fc['hourly']['direct_normal_irradiance']= array_column($combined, 'dni');
+        $fc['hourly']['diffuse_radiation']     = array_column($combined, 'dhi');
+        $fc['hourly']['temperature_2m']        = array_column($combined, 'temp');
+
+        // ---- 9) Finale PV-Berechnung auf den Hybriddaten ----
+        // (unverändert, nutzt POA, Masken etc.)
+        return $this->computePV_FinalFromDataset($fc);
     }
 
     private function computePV_Fallback(array $fc): array
