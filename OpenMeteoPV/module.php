@@ -183,20 +183,6 @@ class OpenMeteoPV extends IPSModule
                 return;
             }
 
-            // --- FORECAST filtern: nur Zukunft ab jetzt ---
-            $fcst = [];
-            for ($i = 0; $i < count($fc['hourly']['time']); $i++) {
-                if ($fc['hourly']['time'][$i] >= $nowISO) {
-                    $fcst[] = [
-                        't' => $fc['hourly']['time'][$i],
-                        'ghi' => $fc['hourly']['shortwave_radiation'][$i] ?? 0,
-                        'dni' => $fc['hourly']['direct_normal_irradiance'][$i] ?? 0,
-                        'dhi' => $fc['hourly']['diffuse_radiation'][$i] ?? 0,
-                        'temp' => $fc['hourly']['temperature_2m'][$i] ?? 0,
-                    ];
-                }
-            }
-
             // 2) computePV (Nowcasting + Hybrid)
             $r = $this->computePV($sat, $fc);
 
