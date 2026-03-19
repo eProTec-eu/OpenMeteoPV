@@ -174,7 +174,8 @@ class OpenMeteoPV extends IPSModule
     {
         try {
             // 1) Daten holen
-            $sat = $this->fetchSatelliteData();
+            //$sat = $this->fetchSatelliteData();
+            $sat = $this->fetchSatelliteArchiveData();
             $fc  = $this->fetchForecastData();
 
             if (!$fc || empty($fc['hourly']['time'])) {
@@ -420,6 +421,34 @@ class OpenMeteoPV extends IPSModule
         if (empty($fc['hourly']['time'])) {
             return $this->computePV_Fallback([]);
         }
+
+
+        // Schritt 1: Archiv‑Zeitstempel extrahieren
+        // Schritt 2: Forecast‑Zeitstempel extrahieren
+        // Schritt 3: Beide Zeitreihen zusammenführen
+        if (!empty($sat['hourly']['time'])) {
+            // Archivdaten ergänzen
+            $fc['hourly']['shortwave_radiation'] = array_merge(
+                $sat['hourly']['shortwave_radiation'] ?? [],
+                $fc['hourly']['shortwave_radiation'] ?? []
+            );
+
+            $fc['hourly']['direct_normal_irradiance'] = array_merge(
+                $sat['hourly']['direct_normal_irradiance'] ?? [],
+                $fc['hourly']['direct_normal_irradiance'] ?? []
+            );
+
+            $fc['hourly']['diffuse_radiation'] = array_merge(
+                $sat['hourly']['diffuse_radiation'] ?? [],
+                $fc['hourly']['diffuse_radiation'] ?? []
+            );
+
+            $fc['hourly']['time'] = array_merge(
+                $sat['hourly']['time'] ?? [],
+                $fc['hourly']['time'] ?? []
+            );
+        }
+
 
         $times = $fc['hourly']['time'];
         $ghi   = $fc['hourly']['shortwave_radiation'] ?? [];
@@ -799,6 +828,14 @@ class OpenMeteoPV extends IPSModule
             'strings' => $stringsOut,
             'json_total' => $jsonTotal
         ];
+    }
+
+    private function fetchSatelliteArchiveData() 
+    {
+        $lat=$this->ReadPropertyFloat('Latitude');
+        $lon=$this->ReadPropertyFloat('Longitude');
+        $url = "https://satellite-api.open-meteo.com/v1/archive?latitude=$lat&longitude=$lon&hourly=shortwave_radiation,direct_normal_irradiance,diffuse_radiation&models=satellite_radiation_seamless&past_days=2&temporal_resolution=native";
+        return $this->fetchUrlJson($url);
     }
 
     /* ============================================================
