@@ -419,10 +419,44 @@ class OpenMeteoPV extends IPSModule
         // ---- 6) Sortieren ----
         usort($combined, fn($a, $b) => strcmp($a['t'], $b['t']));
 
-        // ---- 7) Nowcasting (Archiv-Trend) ----
+        // =============================================================
+        // Jetzt wird der entscheidende Fix umgesetzt:
+        // Nowcasting darf NICHT VOR dem Merge passieren
+        // =============================================================
+
+        // Bisherige combined/clean Struktur ist hier bereits korrekt aufgebaut.
+
+        // applySatelliteNowcast() erwartet ein Forecast‑ähnliches Array.
+        // Wir konvertieren "clean" in ein fc-ähnliches Dataset:
+
+        $tmpFc = [
+            'hourly' => [
+                'time'                      => array_column($clean, 't'),
+                'shortwave_radiation'       => array_column($clean, 'ghi'),
+                'direct_normal_irradiance'  => array_column($clean, 'dni'),
+                'diffuse_radiation'         => array_column($clean, 'dhi'),
+                'temperature_2m'            => array_column($clean, 'temp'),
+            ]
+        ];
+
+        // NOWCASTING anwenden WENN aktiviert
         if ((bool)$this->ReadPropertyBoolean('EnableNowcast')) {
-            $this->SendDebug("Nowcasting", "Aktiv – wende applySatelliteNowcast_Archive() an", 0);
-            $combined = $this->applySatelliteNowcast_Archive($combined);
+            $this->SendDebug('Nowcasting', 'Nowcast aktiv (Variante A)', 0);
+            $tmpFc = $this->applySatelliteNowcast($sat, $tmpFc);
+        }
+
+        // Zurückschreiben in "clean"
+        $clean = [];
+        $nfc = count($tmpFc['hourly']['time']);
+
+        for ($i = 0; $i < $nfc; $i++) {
+            $clean[] = [
+                't'    => $tmpFc['hourly']['time'][$i],
+                'ghi'  => $tmpFc['hourly']['shortwave_radiation'][$i] ?? 0,
+                'dni'  => $tmpFc['hourly']['direct_normal_irradiance'][$i] ?? 0,
+                'dhi'  => $tmpFc['hourly']['diffuse_radiation'][$i] ?? 0,
+                'temp' => $tmpFc['hourly']['temperature_2m'][$i] ?? 0,
+            ];
         }
 
         // ---- 8) Zurückschreiben in Forecast-Struktur ----
