@@ -519,6 +519,7 @@ class OpenMeteoPV extends IPSModule
 
         $arch = [];
         if (!empty($sat['hourly']['time'])) {
+            $sat = $this->archiveToHourly($sat);
             for ($i = 0; $i < count($sat['hourly']['time']); $i++) {
 
                 if ($sat['hourly']['time'][$i] >= $nowISO)
