@@ -875,6 +875,7 @@ class OpenMeteoPV extends IPSModule
 
     private function fetchSatelliteArchiveData() 
     {
+        if (!(bool)$this->ReadPropertyBoolean('UseSatellite')) return null;
         $lat=$this->ReadPropertyFloat('Latitude');
         $lon=$this->ReadPropertyFloat('Longitude');
         $url = "https://satellite-api.open-meteo.com/v1/archive?latitude=$lat&longitude=$lon&hourly=shortwave_radiation,direct_normal_irradiance,diffuse_radiation&models=satellite_radiation_seamless&past_days=2&temporal_resolution=native";
