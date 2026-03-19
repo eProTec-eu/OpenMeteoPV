@@ -302,6 +302,7 @@ class OpenMeteoPV extends IPSModule
 
     private function applySatelliteNowcast(array $sat, array $fc): array
     {
+        // Grundchecks
         if (empty($sat['hourly']['time']) ||
             empty($fc['hourly']['time']) ||
             empty($sat['hourly']['shortwave_radiation']) ||
@@ -312,50 +313,86 @@ class OpenMeteoPV extends IPSModule
         $satT = $sat['hourly']['time'];
         $ghiS = $sat['hourly']['shortwave_radiation'];
         $dniS = $sat['hourly']['direct_normal_irradiance'];
-        $nS   = count($satT);
-        if ($nS < 2) return $fc;
+        $nS = count($satT);
+
+        if ($nS < 3)
+            return $fc;
 
         $fcT  = $fc['hourly']['time'];
         $ghiF = $fc['hourly']['shortwave_radiation'] ?? [];
         $dniF = $fc['hourly']['direct_normal_irradiance'] ?? [];
-        $nF   = count($fcT);
-        if ($nF < 4) return $fc;
+        $nF = count($fcT);
 
-        // letzter Satellitenpunkt: "jetzt" (~jetzt - 20..30 min)
+        if ($nF < 4)
+            return $fc;
+
+        /*
+            Open-Meteo liefert Wh/m² pro Stunde. Für Trend-Berechnung
+            benötigen wir W/m², daher: Wh/h = W
+        */
+
+        // kleine Mittelung für stabileren Trend
         $ghi_now = (float)$ghiS[$nS - 1];
+        $ghi_prev1 = (float)$ghiS[$nS - 2];
+        $ghi_prev2 = (float)$ghiS[$nS - 3];
+
         $dni_now = (float)$dniS[$nS - 1];
+        $dni_prev1 = (float)$dniS[$nS - 2];
+        $dni_prev2 = (float)$dniS[$nS - 3];
 
-        // vorherige Stunde
-        $ghi_prev = (float)$ghiS[$nS - 2];
-        $dni_prev = (float)$dniS[$nS - 2];
+        // Durchschnitt aus 2 Schritten
+        $trend_ghi = (($ghi_now - $ghi_prev1) + ($ghi_prev1 - $ghi_prev2)) / 2.0;
+        $trend_dni = (($dni_now - $dni_prev1) + ($dni_prev1 - $dni_prev2)) / 2.0;
 
-        // Trend/min
-        $trend_ghi = ($ghi_now - $ghi_prev) / 60.0;
-        $trend_dni = ($dni_now - $dni_prev) / 60.0;
+        // Maximal erlaubte Trendstärke (Sicherheitslimit)
+        $maxTrend = 400;  // Wh Änderung pro Stunde
+        $trend_ghi = max(-$maxTrend, min($maxTrend, $trend_ghi));
+        $trend_dni = max(-$maxTrend, min($maxTrend, $trend_dni));
 
         // Zukunftshorizont
         $nowH = max(0.5, min(6.0, (float)$this->ReadPropertyFloat('NowcastHours')));
         $hLimit = min((int)ceil($nowH), $nF - 1);
 
-        $tau = 120.0; // min — Satellite dominiert 0–1h; Forecast übernimmt ab 2h zunehmend
+        // Zeitkonstante für blending
+        $tau = 120.0; // Minuten
 
         for ($h = 1; $h <= $hLimit; $h++) {
-            $t_minutes = $h * 60.0;
 
-            $ghi_sat = max(0.0, $ghi_now + $trend_ghi * $t_minutes);
-            $dni_sat = max(0.0, $dni_now + $trend_dni * $t_minutes);
+            // Extrapolation: da Wh/h = W, zeitliche Skalierung entfällt
+            // (keine /60 oder *60 Fehler!)
+            $ghi_sat = max(0.0, $ghi_now + $trend_ghi * $h);
+            $dni_sat = max(0.0, $dni_now + $trend_dni * $h);
 
             $ghi_fc = (float)($ghiF[$h] ?? $ghi_now);
             $dni_fc = (float)($dniF[$h] ?? $dni_now);
 
+            // Blendinggewicht
+            $t_minutes = $h * 60.0;
             $w = exp(-$t_minutes / $tau);
 
-            $ghiF[$h] = $w * $ghi_sat + (1.0 - $w) * $ghi_fc;
-            $dniF[$h] = $w * $dni_sat + (1.0 - $w) * $dni_fc;
+            // Nowcast mischen
+            $ghi_new = $w * $ghi_sat + (1.0 - $w) * $ghi_fc;
+            $dni_new = $w * $dni_sat + (1.0 - $w) * $dni_fc;
+
+            // Limits gegen Overshooting
+            $ghi_max = max($ghi_fc * 1.4, $ghi_fc + 100);
+            $dni_max = max($dni_fc * 1.4, $dni_fc + 100);
+
+            $ghi_new = min($ghi_new, $ghi_max);
+            $dni_new = min($dni_new, $dni_max);
+
+            // Negative Werte verhindern
+            $ghi_new = max(0.0, $ghi_new);
+            $dni_new = max(0.0, $dni_new);
+
+            // speichern
+            $ghiF[$h] = $ghi_new;
+            $dniF[$h] = $dni_new;
         }
 
-        $fc['hourly']['shortwave_radiation']      = $ghiF;
+        $fc['hourly']['shortwave_radiation'] = $ghiF;
         $fc['hourly']['direct_normal_irradiance'] = $dniF;
+
         return $fc;
     }
 
@@ -464,10 +501,21 @@ class OpenMeteoPV extends IPSModule
                 $dni_eff = ($elSun < $hEl) ? 0.0 : ($dni[$i] ?? 0.0);
                 $dhi_eff = ($elSun < $hEl) ? (($dhi[$i] ?? 0.0) * $diffOb) : ($dhi[$i] ?? 0.0);
 
-                // POA (W/m², stündlich)
-                $poa = $dni_eff * $cosT
-                     + $dhi_eff * (1 + cos($tilt)) / 2
-                     + ($ghi[$i] ?? 0.0) * $albedo * (1 - cos($tilt)) / 2;
+                // --- Strahlungsdaten korrekt als W/m² (Mittelwert) interpretieren ---
+                $GHI = (float)($ghi[$i] ?? 0.0);        // Global Horizontal Irradiance
+                $DNI = (float)($dni[$i] ?? 0.0);        // Direkt Normal
+                $DHI = (float)($dhi[$i] ?? 0.0);        // Diffus
+
+                // Maskenfilter
+                $DNI_eff = $dni_eff; // bereits korrekt: 0 bei Schatten
+                $DHI_eff = $dhi_eff;
+
+                // --- POA (Plane-of-Array Irradiance) korrekt nach PVGIS/ISO ---
+                $poa_beam    = $DNI_eff * $cosT;                        // Direkt zur Modulfläche
+                $poa_diffuse = $DHI_eff * (1 + cos($tilt)) * 0.5;       // Himmel halbseitig
+                $poa_ground  = $GHI * $albedo * (1 - cos($tilt)) * 0.5; // Bodenreflexion
+
+                $poa = $poa_beam + $poa_diffuse + $poa_ground;
 
                 if ($poa < 0) $poa = 0.0;
 
@@ -517,8 +565,7 @@ class OpenMeteoPV extends IPSModule
                 }
 
                 // Tageskörbe
-                $dayTs = strtotime(substr($times[$i], 0, 10));
-                $off = (int)(($dayTs - $refDay) / 86400);
+                $off = $this->dayIndexDSTSafe($times[$i], $times[0]);
                 if (!isset($daily[$off])) $daily[$off] = 0.0;
                 $daily[$off] += $e_kwh;
 
@@ -712,8 +759,7 @@ class OpenMeteoPV extends IPSModule
                 ];
 
                 // Tag summieren
-                $dayTs = strtotime(substr($times[$i], 0, 10));
-                $off = (int)(($dayTs - $refDay) / 86400);
+                $off = $this->dayIndexDSTSafe($times[$i], $times[0]);
                 if (!isset($daily[$off])) $daily[$off] = 0.0;
                 $daily[$off] += $e_kwh;
 
@@ -759,6 +805,27 @@ class OpenMeteoPV extends IPSModule
      *  HELPERS
      * ============================================================ */
 
+    private function dayIndexDSTSafe(string $timestamp, string $firstTimestamp): int
+    {
+        // Datum extrahieren
+        $dCur  = substr($timestamp, 0, 10);
+        $dBase = substr($firstTimestamp, 0, 10);
+
+        // DateTime-Objekte erstellen
+        $dtCur  = new DateTime($dCur . " 00:00:00");
+        $dtBase = new DateTime($dBase . " 00:00:00");
+
+        // Differenz in Tagen (DST-sicher)
+        $diff = (int)($dtBase->diff($dtCur)->days);
+
+        // Richtung bestimmen
+        if ($dtCur < $dtBase) {
+            $diff = -$diff;
+        }
+
+        return $diff;
+    }
+
     private function getArrays(): array
     {
         $a = json_decode($this->ReadPropertyString('Arrays'), true);
@@ -782,39 +849,75 @@ class OpenMeteoPV extends IPSModule
 
     private function horizonElevation(array $mask, float $azimuthRad): float
     {
-        if (count($mask) < 2) return 0.0;
-
-        // Normalisieren
-        foreach ($mask as &$pt) {
-            $az = (float)$pt['az'];
-            $az = fmod(($az + 540.0), 360.0) - 180.0;
-            $pt['az'] = $az;
+        // 1) Fallback bei leerer Maske → 0°
+        if (count($mask) < 2) {
+            return 0.0;
         }
-        unset($pt);
 
-        // Sonnen-Azimut in Grad/normalisiert
+        // 2) Normalisieren + in lokales Array kopieren
+        $m = [];
+        foreach ($mask as $pt) {
+            if (!isset($pt['az']) || !isset($pt['el']))
+                continue;
+            $az = fmod(($pt['az'] + 540.0), 360.0) - 180.0;
+            $el = (float)$pt['el'];
+            $m[] = ['az' => $az, 'el' => $el];
+        }
+
+        if (count($m) < 2)
+            return 0.0;
+
+        // 3) Sortieren
+        usort($m, fn($a, $b) => $a['az'] <=> $b['az']);
+
+        // 4) Sanfte Glättung (1-2 Nachbarn)
+        //    → Übergänge weicher, realistische Schattenlinien
+        $smooth = [];
+        $N = count($m);
+        for ($i = 0; $i < $N; $i++) {
+            $prev = $m[($i - 1 + $N) % $N]['el'];
+            $mid  = $m[$i]['el'];
+            $next = $m[($i + 1) % $N]['el'];
+
+            // Gewichtetes Mittel 20%-60%-20%
+            $smooth[] = [
+                'az' => $m[$i]['az'],
+                'el' => ($prev * 0.2 + $mid * 0.6 + $next * 0.2)
+            ];
+        }
+
+        // 5) Sonnenazimut normalisieren
         $az = rad2deg($azimuthRad);
         $az = fmod(($az + 540.0), 360.0) - 180.0;
 
-        usort($mask, fn($a,$b) => ($a['az'] <=> $b['az']));
-
-        $prev = end($mask); reset($mask);
-        foreach ($mask as $pt) {
+        // 6) Interpolation (zyklisch)
+        $prev = $smooth[$N - 1];
+        foreach ($smooth as $pt) {
             if ($az <= $pt['az']) {
-                $x0 = (float)$prev['az']; $y0 = (float)$prev['el'];
-                $x1 = (float)$pt['az'];   $y1 = (float)$pt['el'];
-                if ($x1 == $x0) return $y1;
+                $x0 = $prev['az'];
+                $y0 = $prev['el'];
+                $x1 = $pt['az'];
+                $y1 = $pt['el'];
+
+                if ($x1 == $x0)
+                    return $y1;
+
                 $t = ($az - $x0) / ($x1 - $x0);
                 return $y0 + $t * ($y1 - $y0);
             }
             $prev = $pt;
         }
-        // Wrap-around
-        $first = $mask[0];
-        $x0 = (float)$prev['az'];   $y0 = (float)$prev['el'];
-        $x1 = (float)$first['az'] + 360.0; $y1 = (float)$first['el'];
+
+        // 7) Wrap-Around-interpolation (letzter → erster)
+        $first = $smooth[0];
+        $x0 = $prev['az'];
+        $y0 = $prev['el'];
+        $x1 = $first['az'] + 360.0;
+        $y1 = $first['el'];
+
         $azw = ($az < $first['az']) ? $az + 360.0 : $az;
         $t = ($azw - $x0) / ($x1 - $x0);
+
         return $y0 + $t * ($y1 - $y0);
     }
 
