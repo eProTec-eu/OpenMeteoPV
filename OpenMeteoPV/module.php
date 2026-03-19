@@ -371,6 +371,8 @@ class OpenMeteoPV extends IPSModule
      * ============================================================ */
     private function computePV(?array $sat, array $fc): array
     {
+        $sat = $this->archiveToHourly($sat);
+        
         // ---- 1) Zeit JETZT in ISO-UTC ----
         $nowISO = (new DateTime('now', new DateTimeZone('UTC')))
             ->format('Y-m-d\TH:i:00\Z');
@@ -631,6 +633,54 @@ class OpenMeteoPV extends IPSModule
     /* ============================================================
      *  HELPERS
      * ============================================================ */
+
+    private function archiveToHourly(array $sat): array
+    {
+        if (empty($sat['hourly']['time'])) return $sat;
+
+        $times = $sat['hourly']['time'];
+        $ghi   = $sat['hourly']['shortwave_radiation'];
+        $dni   = $sat['hourly']['direct_normal_irradiance'];
+        $dhi   = $sat['hourly']['diffuse_radiation'];
+
+        $groups = [];
+
+        for ($i = 0; $i < count($times); $i++) {
+            // Stunde extrahieren: YYYY-MM-DDTHH:00
+            $dt = new DateTime($times[$i]);
+            $key = $dt->format("Y-m-d\TH:00");
+
+            if (!isset($groups[$key])) {
+                $groups[$key] = ['ghi'=>[], 'dni'=>[], 'dhi'=>[]];
+            }
+
+            $groups[$key]['ghi'][] = $ghi[$i];
+            $groups[$key]['dni'][] = $dni[$i];
+            $groups[$key]['dhi'][] = $dhi[$i];
+        }
+
+        // Stundenmittel bilden
+        $newTimes = [];
+        $newGHI   = [];
+        $newDNI   = [];
+        $newDHI   = [];
+
+        foreach ($groups as $t => $vals) {
+            $newTimes[] = $t . ":00Z"; // ISO
+            $newGHI[]   = array_sum($vals['ghi']) / max(1, count($vals['ghi']));
+            $newDNI[]   = array_sum($vals['dni']) / max(1, count($vals['dni']));
+            $newDHI[]   = array_sum($vals['dhi']) / max(1, count($vals['dhi']));
+        }
+
+        return [
+            'hourly' => [
+                'time'                   => $newTimes,
+                'shortwave_radiation'   => $newGHI,
+                'direct_normal_irradiance'=> $newDNI,
+                'diffuse_radiation'     => $newDHI
+            ]
+        ];
+    }
 
     private function dayIndexDSTSafe(string $timestamp, string $firstTimestamp): int
     {
