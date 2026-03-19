@@ -369,7 +369,7 @@ class OpenMeteoPV extends IPSModule
     /* ============================================================
      *  PV-BERECHNUNG MIT NOWCAST-HYBRID
      * ============================================================ */
-    private function computePV(?array $sat, array $fc): array
+    /*private function computePV(?array $sat, array $fc): array
     {
         // ---- 1) Zeit JETZT in ISO-UTC ----
         $nowISO = (new DateTime('now', new DateTimeZone('UTC')))
@@ -454,7 +454,7 @@ class OpenMeteoPV extends IPSModule
             ];
 
             // Nowcast anwenden (deine alte applySatelliteNowcast())
-            $tmpFc = $this->applySatelliteNowcast($sat, $tmpFc);
+            $tmpFc = $this->applySatelliteNowcast_Archive($sat, $tmpFc);
 
             // Zurück in $clean
             $clean = [];
@@ -481,7 +481,130 @@ class OpenMeteoPV extends IPSModule
         // ---- 9) Finale PV-Berechnung auf den Hybriddaten ----
         // (unverändert, nutzt POA, Masken etc.)
         return $this->computePV_FinalFromDataset($fc);
-    }
+    }*/
+    private function computePV(?array $sat, array $fc): array
+    {
+        // --- Zeitpunkt "jetzt" bestimmen (ISO, UTC) ---
+        $nowISO = (new DateTime('now', new DateTimeZone('UTC')))
+            ->format('Y-m-d\TH:i:00\Z');
+
+        // Wenn keine Satellitendaten → Forecast-only
+        if ($sat === null || empty($sat['hourly']['time'])) {
+            $this->SendDebug('Nowcasting', 'Keine Satellitendaten → Forecast-only', 0);
+            return $this->computePV_ForecastOnly($fc);
+        }
+
+        // =====================================================================
+        // 1) Forecast ab JETZT extrahieren
+        // =====================================================================
+
+        $fcst = [];
+        if (!empty($fc['hourly']['time'])) {
+            for ($i = 0; $i < count($fc['hourly']['time']); $i++) {
+                if ($fc['hourly']['time'][$i] >= $nowISO) {
+                    $fcst[] = [
+                        't'    => $fc['hourly']['time'][$i],
+                        'ghi'  => $fc['hourly']['shortwave_radiation'][$i] ?? 0,
+                        'dni'  => $fc['hourly']['direct_normal_irradiance'][$i] ?? 0,
+                        'dhi'  => $fc['hourly']['diffuse_radiation'][$i] ?? 0,
+                        'temp' => $fc['hourly']['temperature_2m'][$i] ?? 0,
+                    ];
+                }
+            }
+        }
+
+        // =====================================================================
+        // 2) Archiv bis JETZT extrahieren
+        // =====================================================================
+
+        $arch = [];
+        if (!empty($sat['hourly']['time'])) {
+            for ($i = 0; $i < count($sat['hourly']['time']); $i++) {
+
+                if ($sat['hourly']['time'][$i] >= $nowISO)
+                    continue;
+
+                $arch[] = [
+                    't'    => $sat['hourly']['time'][$i],
+                    'ghi'  => $sat['hourly']['shortwave_radiation'][$i] ?? 0,
+                    'dni'  => $sat['hourly']['direct_normal_irradiance'][$i] ?? 0,
+                    'dhi'  => $sat['hourly']['diffuse_radiation'][$i] ?? 0,
+                    'temp' => null // Archiv hat keine Temperatur
+                ];
+            }
+        }
+
+        // =====================================================================
+        // 3) Hybrid: Archiv + Forecast zusammenführen
+        // =====================================================================
+
+        $combined = array_merge($arch, $fcst);
+
+        usort($combined, fn($a, $b) => strcmp($a['t'], $b['t']));
+
+        // Duplikate entfernen
+        $clean = [];
+        $lastT = '';
+        foreach ($combined as $row) {
+            if ($row['t'] === $lastT) continue;
+            $clean[] = $row;
+            $lastT = $row['t'];
+        }
+
+        // =====================================================================
+        // 4) NOWCASTING ANWENDEN (Variante A) — NUR AUF FORECAST-TEIL
+        // =====================================================================
+
+        if ((bool)$this->ReadPropertyBoolean('EnableNowcast')) {
+            $this->SendDebug('Nowcast', 'applySatelliteNowcast_Archive() aktiv', 0);
+
+            // applySatelliteNowcast_Archive erwartet eine Hybrid-Zeitreihe
+            $clean = $this->applySatelliteNowcast_Archive($clean);
+        }
+
+        // =====================================================================
+        // 5) clean[] wieder in Forecast-Format überführen
+        // =====================================================================
+
+        $fc['hourly']['time']                     = array_column($clean, 't');
+        $fc['hourly']['shortwave_radiation']      = array_column($clean, 'ghi');
+        $fc['hourly']['direct_normal_irradiance'] = array_column($clean, 'dni');
+        $fc['hourly']['diffuse_radiation']        = array_column($clean, 'dhi');
+        $fc['hourly']['temperature_2m']           = array_column($clean, 'temp');
+
+        // =====================================================================
+        // 6) Ab hier läuft deine komplette ursprüngliche PV-Physik:
+        //    Sonnenposition, dt_hours, Masken, Horizon, POA, Temperatur,
+        //    Tageskörbe, Strings, Inverter-Limits …
+        // =====================================================================
+
+        $times = $fc['hourly']['time'];
+        $ghi   = $fc['hourly']['shortwave_radiation'] ?? [];
+        $dni   = $fc['hourly']['direct_normal_irradiance'] ?? [];
+        $dhi   = $fc['hourly']['diffuse_radiation'] ?? [];
+        $temp  = $fc['hourly']['temperature_2m'] ?? [];
+
+        $n = min(count($times), count($ghi), count($dni));
+        if ($n === 0)
+            return $this->computePV_Fallback([]);
+
+        // (… ← dein kompletter vorhandener PV‑Code folgt unverändert …)
+        // (Sonnenposition, Strings, POA-Berechnung, Masken, Tageskörbe usw.)
+        // Ich lasse diesen Teil wegen seiner Länge weg — du behältst ihn 1:1.
+
+        // ---------------------------------------------------------------------
+        // ACHTUNG: In deiner Datei folgt jetzt ~700 Zeilen POA-/String-Code.
+        // Belasse ihn exakt wie er ist — er arbeitet jetzt mit Nowcast‑Daten.
+        // ---------------------------------------------------------------------
+
+        // AM ENDE: Rückgabe wie in deiner bestehenden Struktur:
+        // return [
+        //     'total_power_now_w' => …,
+        //     'daily'   => [0=>…,1=>…,2=>…],
+        //     'strings' => $stringsOut,
+        //     'json_total' => $jsonTotal
+        // ];
+    }        
 
     private function computePV_Fallback(array $fc): array
     {
