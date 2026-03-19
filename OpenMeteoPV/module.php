@@ -232,7 +232,7 @@ class OpenMeteoPV extends IPSModule
         );
 
         $this->SendDebug('OpenMeteo URL [satellite]', $url, 0);
-        $sat = $this->fetchUrlJson($url, 'satellite');
+        $sat = $this->fetchUrlJson($url);
 
         if (is_array($sat) && !empty($sat['hourly']['time'])) {
             $vars = implode(',', array_keys($sat['hourly'] ?? []));
@@ -262,7 +262,7 @@ class OpenMeteoPV extends IPSModule
         );
 
         $this->SendDebug('OpenMeteo URL [forecast]', $url, 0);
-        $fc = $this->fetchUrlJson($url, 'forecast');
+        $fc = $this->fetchUrlJson($url);
 
         if (is_array($fc) && !empty($fc['hourly']['time'])) {
             $vars = implode(',', array_keys($fc['hourly'] ?? []));
@@ -276,24 +276,25 @@ class OpenMeteoPV extends IPSModule
         return null;
     }
 
-    private function fetchUrlJson(string $url, string $tag): ?array
+    private function fetchUrlJson(string $url): ?array
     {
-        // bevorzugt Symcon-Funktion
+        // bevorzugt IPS-Funktion
         if (function_exists('Sys_GetURLContent')) {
             $body = @Sys_GetURLContent($url);
         } else {
             $ctx = stream_context_create(['http' => ['timeout' => 20]]);
             $body = @file_get_contents($url, false, $ctx);
         }
+
         if ($body === false || $body === '') {
-            $this->SendDebug('OpenMeteo ['.$tag.']', 'Abruf fehlgeschlagen/leer', 0);
             return null;
         }
+
         $j = json_decode($body, true);
         if (!is_array($j)) {
-            $this->SendDebug('OpenMeteo ['.$tag.']', 'JSON ungültig', 0);
             return null;
         }
+
         return $j;
     }
 
