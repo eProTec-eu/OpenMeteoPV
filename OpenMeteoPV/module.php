@@ -588,22 +588,9 @@ class OpenMeteoPV extends IPSModule
         if ($n === 0)
             return $this->computePV_Fallback([]);
 
-        // (… ← dein kompletter vorhandener PV‑Code folgt unverändert …)
-        // (Sonnenposition, Strings, POA-Berechnung, Masken, Tageskörbe usw.)
-        // Ich lasse diesen Teil wegen seiner Länge weg — du behältst ihn 1:1.
-
-        // ---------------------------------------------------------------------
-        // ACHTUNG: In deiner Datei folgt jetzt ~700 Zeilen POA-/String-Code.
-        // Belasse ihn exakt wie er ist — er arbeitet jetzt mit Nowcast‑Daten.
-        // ---------------------------------------------------------------------
-
-        // AM ENDE: Rückgabe wie in deiner bestehenden Struktur:
-        // return [
-        //     'total_power_now_w' => …,
-        //     'daily'   => [0=>…,1=>…,2=>…],
-        //     'strings' => $stringsOut,
-        //     'json_total' => $jsonTotal
-        // ];
+        // 7) Finale PV-Berechnung auf den Hybriddaten ----
+        // (unverändert, nutzt POA, Masken etc.)
+        return $this->computePV_FinalFromDataset($fc);
     }        
 
     private function computePV_Fallback(array $fc): array
