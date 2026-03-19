@@ -183,6 +183,20 @@ class OpenMeteoPV extends IPSModule
                 return;
             }
 
+            // --- FORECAST filtern: nur Zukunft ab jetzt ---
+            $fcst = [];
+            for ($i = 0; $i < count($fc['hourly']['time']); $i++) {
+                if ($fc['hourly']['time'][$i] >= $nowISO) {
+                    $fcst[] = [
+                        't' => $fc['hourly']['time'][$i],
+                        'ghi' => $fc['hourly']['shortwave_radiation'][$i] ?? 0,
+                        'dni' => $fc['hourly']['direct_normal_irradiance'][$i] ?? 0,
+                        'dhi' => $fc['hourly']['diffuse_radiation'][$i] ?? 0,
+                        'temp' => $fc['hourly']['temperature_2m'][$i] ?? 0,
+                    ];
+                }
+            }
+
             // 2) computePV (Nowcasting + Hybrid)
             $r = $this->computePV($sat, $fc);
 
@@ -428,7 +442,24 @@ class OpenMeteoPV extends IPSModule
         // Schritt 2: Forecast‑Zeitstempel extrahieren
         // Schritt 3: Beide Zeitreihen zusammenführen
         if (!empty($sat['hourly']['time'])) {
+            // --- Transition-Zeitpunkt bestimmen (JETZT) ---
+            $nowISO = (new DateTime('now', new DateTimeZone('UTC')))->format('Y-m-d\TH:i:00\Z');
+
+            // --- ARCHIV filtern: nur Vergangenheit bis jetzt ---
+            $arch = [];
+            for ($i = 0; $i < count($sat['hourly']['time']); $i++) {
+                if ($sat['hourly']['time'][$i] < $nowISO) {
+                    $arch[] = [
+                        't' => $sat['hourly']['time'][$i],
+                        'ghi' => $sat['hourly']['shortwave_radiation'][$i] ?? 0,
+                        'dni' => $sat['hourly']['direct_normal_irradiance'][$i] ?? 0,
+                        'dhi' => $sat['hourly']['diffuse_radiation'][$i] ?? 0,
+                    ];
+                }
+            }
+
             // Archivdaten ergänzen
+            /*
             $fc['hourly']['shortwave_radiation'] = array_merge(
                 $sat['hourly']['shortwave_radiation'] ?? [],
                 $fc['hourly']['shortwave_radiation'] ?? []
@@ -447,9 +478,11 @@ class OpenMeteoPV extends IPSModule
             $fc['hourly']['time'] = array_merge(
                 $sat['hourly']['time'] ?? [],
                 $fc['hourly']['time'] ?? []
-            );
+            );*/
+            $combined = array_merge($arch, $fcst);
 
             // --- Zeitreihe sortieren ---
+            /*
             $combined = [];
             for ($i = 0; $i < count($fc['hourly']['time']); $i++) {
                 $combined[] = [
@@ -459,7 +492,7 @@ class OpenMeteoPV extends IPSModule
                     'dhi' => $fc['hourly']['diffuse_radiation'][$i] ?? 0,
                     'temp' => $fc['hourly']['temperature_2m'][$i] ?? 0,
                 ];
-            }
+            }*/
 
             // Sortieren nach Zeit
             usort($combined, fn($a, $b) => strcmp($a['t'], $b['t']));
