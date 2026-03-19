@@ -371,8 +371,6 @@ class OpenMeteoPV extends IPSModule
      * ============================================================ */
     private function computePV(?array $sat, array $fc): array
     {
-        $sat = $this->archiveToHourly($sat);
-        
         // ---- 1) Zeit JETZT in ISO-UTC ----
         $nowISO = (new DateTime('now', new DateTimeZone('UTC')))
             ->format('Y-m-d\TH:i:00\Z');
@@ -382,6 +380,8 @@ class OpenMeteoPV extends IPSModule
             $this->SendDebug('Nowcasting', 'Keine Satellitendaten → Forecast-only', 0);
             return $this->computePV_ForecastOnly($fc);
         }
+        else
+            $sat = $this->archiveToHourly($sat);
 
         // ---- 3) ARCHIV in ein einheitliches Array konvertieren ----
         $arch = [];
