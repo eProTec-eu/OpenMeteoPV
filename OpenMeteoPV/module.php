@@ -403,6 +403,9 @@ class OpenMeteoPV extends IPSModule
      * ============================================================ */
     private function computePV(?array $sat, array $fc): array
     {
+        // --- Transition-Zeitpunkt bestimmen (JETZT) ---
+        $nowISO = (new DateTime('now', new DateTimeZone('UTC')))->format('Y-m-d\TH:i:00\Z');    
+        
         // Falls Satellite fehlt → Forecast-only
         if ($sat === null || empty($sat['hourly']['time'])) {
             $this->SendDebug('Nowcasting', 'Satellite-Daten fehlen → Forecast-only', 0);
@@ -441,9 +444,6 @@ class OpenMeteoPV extends IPSModule
         // Schritt 2: Forecast‑Zeitstempel extrahieren
         // Schritt 3: Beide Zeitreihen zusammenführen
         if (!empty($sat['hourly']['time'])) {
-            // --- Transition-Zeitpunkt bestimmen (JETZT) ---
-            $nowISO = (new DateTime('now', new DateTimeZone('UTC')))->format('Y-m-d\TH:i:00\Z');
-
             // --- ARCHIV filtern: nur Vergangenheit bis jetzt ---
             $arch = [];
             for ($i = 0; $i < count($sat['hourly']['time']); $i++) {
