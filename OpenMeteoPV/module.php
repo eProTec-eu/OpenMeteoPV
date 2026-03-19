@@ -448,6 +448,37 @@ class OpenMeteoPV extends IPSModule
                 $sat['hourly']['time'] ?? [],
                 $fc['hourly']['time'] ?? []
             );
+
+            // --- Zeitreihe sortieren ---
+            $combined = [];
+            for ($i = 0; $i < count($fc['hourly']['time']); $i++) {
+                $combined[] = [
+                    't' => $fc['hourly']['time'][$i],
+                    'ghi' => $fc['hourly']['shortwave_radiation'][$i] ?? 0,
+                    'dni' => $fc['hourly']['direct_normal_irradiance'][$i] ?? 0,
+                    'dhi' => $fc['hourly']['diffuse_radiation'][$i] ?? 0,
+                    'temp' => $fc['hourly']['temperature_2m'][$i] ?? 0,
+                ];
+            }
+
+            // Sortieren nach Zeit
+            usort($combined, fn($a, $b) => strcmp($a['t'], $b['t']));
+
+            // Duplikate entfernen
+            $clean = [];
+            $lastT = '';
+            foreach ($combined as $row) {
+                if ($row['t'] === $lastT) continue;
+                $clean[] = $row;
+                $lastT = $row['t'];
+            }
+
+            // Zurückschreiben
+            $fc['hourly']['time'] = array_column($clean, 't');
+            $fc['hourly']['shortwave_radiation'] = array_column($clean, 'ghi');
+            $fc['hourly']['direct_normal_irradiance'] = array_column($clean, 'dni');
+            $fc['hourly']['diffuse_radiation'] = array_column($clean, 'dhi');
+            $fc['hourly']['temperature_2m'] = array_column($clean, 'temp');
         }
 
 
@@ -518,6 +549,16 @@ class OpenMeteoPV extends IPSModule
                 $zen = $solar[$i]['zenith'];
                 $azs = $solar[$i]['azimuth'];
 
+                // --- Zeitdelta bestimmen (dt_hours) ---
+                $t0 = strtotime($times[$i]);
+                if ($i + 1 < $n) {
+                    $t1 = strtotime($times[$i + 1]);
+                } else {
+                    // Fallback: 1h, wenn letzter Eintrag
+                    $t1 = $t0 + 3600;
+                }
+                $dt_hours = max(0.016, ($t1 - $t0) / 3600.0);  // min 1 Minute Schutz
+
                 // Einfallswinkel
                 $cosT = $this->cosIncidence($tilt, $azM, $zen, $azs);
                 if ($cosT < 0) $cosT = 0.0;
@@ -553,11 +594,12 @@ class OpenMeteoPV extends IPSModule
                 $tcell = ($temp[$i] ?? 20.0) + ($NOCT - 20.0)/800.0 * $poa;
 
                 // Energie (kWh) pro Stunde
-                $e_kwh = $kWp * ($poa / 1000.0) * $loss * (1 + $gamma * ($tcell - 25.0));
+                $e_kwh = $kWp * ($poa / 1000.0) * $loss * (1 + $gamma * ($tcell - 25.0)) * $dt_hours;
                 if ($e_kwh < 0) $e_kwh = 0.0;
 
                 // Leistung (W)
-                $pW = $e_kwh * 1000.0; // 1h Mittelwert
+                //$pW = $e_kwh * 1000.0; // 1h Mittelwert
+                $pW = ($dt_hours > 0 ? ($e_kwh / $dt_hours) * 1000.0 : 0);
                 if ($inv > 0 && $pW > $inv * 1000.0) {
                     $pW = $inv * 1000.0;
                     $e_kwh = $inv * 1.0; // 1h * inv[kW]
