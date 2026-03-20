@@ -812,10 +812,17 @@ class OpenMeteoPV extends IPSModule
         $ghi_p1  = $ghi[$n-2];
         $ghi_p2  = $ghi[$n-3];
 
-        // Zweite Ableitung vereinfacht
         $trend = (($ghi_now - $ghi_p1) + ($ghi_p1 - $ghi_p2)) / 2.0;
+        $trend = max(-200, min(200, $trend));
 
-        return max(-200, min(200, $trend)); // Trendlimit
+        $this->debugNowcast("Trend", [
+            "ghi_now" => $ghi_now,
+            "ghi_p1"  => $ghi_p1,
+            "ghi_p2"  => $ghi_p2,
+            "trend"   => $trend
+        ]);
+
+        return $trend;
     }
 
     private function fetchSatelliteNative(): ?array
@@ -884,8 +891,30 @@ class OpenMeteoPV extends IPSModule
 
             $ghi[$i] = max(0, $ghi[$i] + $trend * $dt);
         }
+       
+        $this->SendDebug('OpenMeteo apply Nowcast', 'aktiv', 0);
 
         return $fc;
+    } 
+    
+    private function debugNowcast(string $label, array $data)
+    {
+        if (!(bool)$this->ReadPropertyBoolean('EnableDiagnostics'))
+            return;
+
+        $hour = (int)date('G');
+        $start = (int)$this->ReadPropertyInteger('DiagStartHour');
+        $end   = (int)$this->ReadPropertyInteger('DiagEndHour');
+
+        if ($hour < $start || $hour > $end)
+            return;
+
+        $msg = json_encode(
+            [$label => $data],
+            JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT
+        );
+
+        $this->SendDebug("NowcastDebug", $msg, 0);
     }    
 
     private function fetchSatelliteArchiveData() 
