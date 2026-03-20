@@ -610,7 +610,8 @@ class OpenMeteoPV extends IPSModule
         $fc = $this->applyBiasCorrection($fc, $satNative);
 
         // 4) Nowcast kurzfristig
-        $fc = $this->applyNowcast($fc, $trend);
+        if ((bool)$this->ReadPropertyBoolean('EnableNowcast'))
+            $fc = $this->applyNowcast($fc, $trend);
 
         // 5) PV final
         return $this->computePV_FinalFromDataset($fc);
