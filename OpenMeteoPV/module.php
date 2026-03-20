@@ -481,7 +481,7 @@ class OpenMeteoPV extends IPSModule
         // ---- 9) Finale PV-Berechnung auf den Hybriddaten ----
         // (unverändert, nutzt POA, Masken etc.)
         return $this->computePV_FinalFromDataset($fc);
-    }*/
+    }
     private function computePV(?array $sat, array $fc): array
     {
         // --- Zeitpunkt "jetzt" bestimmen (ISO, UTC) ---
@@ -592,7 +592,29 @@ class OpenMeteoPV extends IPSModule
         // 7) Finale PV-Berechnung auf den Hybriddaten ----
         // (unverändert, nutzt POA, Masken etc.)
         return $this->computePV_FinalFromDataset($fc);
-    }        
+    }*/        
+
+    private function computePV(?array $sat, array $fc): array
+    {
+        // 1) Satellite Native holen
+        $satNative = $this->fetchSatelliteNative();
+
+        if ($satNative === null) {
+            return $this->computePV_FinalFromDataset($fc);
+        }
+
+        // 2) Trend nur über GHI
+        $trend = $this->computeSatelliteTrend($satNative);
+
+        // 3) Bias Correction
+        $fc = $this->applyBiasCorrection($fc, $satNative);
+
+        // 4) Nowcast kurzfristig
+        $fc = $this->applyNowcast($fc, $trend);
+
+        // 5) PV final
+        return $this->computePV_FinalFromDataset($fc);
+    }
 
     private function computePV_Fallback(array $fc): array
     {
@@ -777,6 +799,93 @@ class OpenMeteoPV extends IPSModule
             'json_total' => $jsonTotal
         ];
     }
+
+    private function computeSatelliteTrend(array $sat): float
+    {
+        $ghi = $sat['shortwave_radiation'] ?? [];
+        $n = count($ghi);
+
+        if ($n < 3) return 0.0;
+
+        $ghi_now = $ghi[$n-1];
+        $ghi_p1  = $ghi[$n-2];
+        $ghi_p2  = $ghi[$n-3];
+
+        // Zweite Ableitung vereinfacht
+        $trend = (($ghi_now - $ghi_p1) + ($ghi_p1 - $ghi_p2)) / 2.0;
+
+        return max(-200, min(200, $trend)); // Trendlimit
+    }
+
+    private function fetchSatelliteNative(): ?array
+    {
+        if (!(bool)$this->ReadPropertyBoolean('UseSatellite')) return null;
+
+        $lat = $this->ReadPropertyFloat('Latitude');
+        $lon = $this->ReadPropertyFloat('Longitude');
+        $pd  = max(0, min(2, (int)$this->ReadPropertyInteger('PastDays'))); // max 48h
+
+        $url = "https://satellite-api.open-meteo.com/v1/archive"
+            . "?latitude=$lat&longitude=$lon"
+            . "&hourly=shortwave_radiation,diffuse_radiation"
+            . "&models=satellite_radiation_seamless"
+            . "&past_days=$pd&temporal_resolution=native";
+
+        $sat = $this->fetchUrlJson($url);
+        if (!is_array($sat) || empty($sat['hourly']['time'])) return null;
+
+        return $sat['hourly'];
+    }    
+
+    private function applyBiasCorrection(array $fc, array $sat): array
+    {
+        $times = $fc['hourly']['time'];
+        if (empty($times)) return $fc;
+
+        // Zeitpunkt Forecast_now suchen
+        $now = time();
+        $idx = 0; $best = PHP_INT_MAX;
+        foreach ($times as $i => $t) {
+            $d = abs(strtotime($t) - $now);
+            if ($d < $best) { $best = $d; $idx = $i; }
+        }
+
+        // GHI jetzt: Forecast vs Satellite
+        $ghi_fc = $fc['hourly']['shortwave_radiation'][$idx] ?? 0;
+        $sat_last = end($sat['shortwave_radiation']);
+
+        $bias = $sat_last - $ghi_fc;
+
+        // Glättungsfaktor
+        $alpha = 0.7;
+
+        // Korrektur auf ALLE zukünftigen Punkte anwenden
+        for ($i = $idx; $i < count($times); $i++) {
+            $fc['hourly']['shortwave_radiation'][$i] =
+                max(0, $fc['hourly']['shortwave_radiation'][$i] + $alpha * $bias);
+        }
+
+        return $fc;
+    }
+
+    private function applyNowcast(array $fc, float $trend): array
+    {
+        $times = &$fc['hourly']['time'];
+        $ghi   = &$fc['hourly']['shortwave_radiation'];
+
+        $n = count($times);
+        $now = time();
+
+        for ($i = 0; $i < $n; $i++) {
+            $dt = (strtotime($times[$i]) - $now) / 3600.0;
+
+            if ($dt <= 0 || $dt > 1.0) continue; // nur 1h vorhersagen
+
+            $ghi[$i] = max(0, $ghi[$i] + $trend * $dt);
+        }
+
+        return $fc;
+    }    
 
     private function fetchSatelliteArchiveData() 
     {
