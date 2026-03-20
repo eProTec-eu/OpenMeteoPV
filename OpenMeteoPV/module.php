@@ -827,23 +827,66 @@ class OpenMeteoPV extends IPSModule
 
     private function fetchSatelliteNative(): ?array
     {
-        if (!(bool)$this->ReadPropertyBoolean('UseSatellite')) return null;
+        if (!(bool)$this->ReadPropertyBoolean('UseSatellite'))
+            return null;
 
         $lat = $this->ReadPropertyFloat('Latitude');
         $lon = $this->ReadPropertyFloat('Longitude');
-        $pd  = max(0, min(2, (int)$this->ReadPropertyInteger('PastDays'))); // max 48h
+        $pd  = max(0, min(2, (int)$this->ReadPropertyInteger('PastDays')));
 
         $url = "https://satellite-api.open-meteo.com/v1/archive"
             . "?latitude=$lat&longitude=$lon"
-            . "&hourly=shortwave_radiation,diffuse_radiation"
+            . "&hourly=shortwave_radiation,diffuse_radiation,direct_normal_irradiance"
             . "&models=satellite_radiation_seamless"
             . "&past_days=$pd&temporal_resolution=native";
 
-        $sat = $this->fetchUrlJson($url);
-        if (!is_array($sat) || empty($sat['hourly']['time'])) return null;
+        $raw = $this->fetchUrlJson($url);
 
-        return $sat['hourly'];
-    }    
+        if (!is_array($raw)) {
+            $this->debugNowcast("SatelliteFetchError", ["raw" => $raw]);
+            return null;
+        }
+
+        if (!isset($raw['hourly'])) {
+            $this->debugNowcast("SatelliteMissingHourly", $raw);
+            return null;
+        }
+
+        $h = $raw['hourly'];
+
+        // Fallback-Key-Korrekturen
+        $map = [
+            'ghi' => $h['shortwave_radiation'] ?? $h['surface_solar_radiation_downwards'] ?? null,
+            'dhi' => $h['diffuse_radiation'] ?? null,
+            'dni' => $h['direct_normal_irradiance'] ?? $h['direct_radiation'] ?? null,
+            'time' => $h['time'] ?? null
+        ];
+
+        // Null-Entfernung
+        if (empty($map['time']) || empty($map['ghi'])) {
+            $this->debugNowcast("SatelliteEmptyFields", $map);
+            return null;
+        }
+
+        // Entferne null-Werte in der Serie
+        $clean = ["time" => [], "ghi" => [], "dhi" => [], "dni" => []];
+
+        foreach ($map['time'] as $i => $t) {
+            if ($map['ghi'][$i] === null) continue;
+
+            $clean["time"][] = $t;
+            $clean["ghi"][]  = $map['ghi'][$i];
+            $clean["dhi"][]  = $map['dhi'][$i] ?? 0;
+            $clean["dni"][]  = $map['dni'][$i] ?? 0;
+        }
+
+        $this->debugNowcast("SatelliteCleaned", [
+            "count" => count($clean["time"]),
+            "last_ghi" => end($clean["ghi"])
+        ]);
+
+        return $clean;
+    }   
 
     private function applyBiasCorrection(array $fc, array $sat): array
     {
