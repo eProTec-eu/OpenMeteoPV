@@ -124,8 +124,20 @@ class OpenMeteoPV extends IPSModule
         $arraysJson = $this->ReadPropertyString('Arrays') ?: '[]';
         return json_encode([
             'elements' => [
-                ['type' => 'NumberSpinner', 'name' => 'Latitude',  'caption' => 'Breite (°)'],
-                ['type' => 'NumberSpinner', 'name' => 'Longitude', 'caption' => 'Länge (°)'],
+                [
+                    'type'    => 'NumberSpinner',
+                    'name'    => 'Latitude',
+                    'caption' => 'Breite (°)',
+                    'digits'  => 3
+                ]
+                ,
+                [
+                    'type'    => 'NumberSpinner',
+                    'name'    => 'Longitude',
+                    'caption' => 'Länge (°)',
+                    'digits'  => 3
+                ]
+                ,
                 [
                     'type' => 'Select', 'name' => 'Timezone', 'caption' => 'Zeitzone',
                     'options' => [
