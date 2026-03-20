@@ -803,7 +803,7 @@ class OpenMeteoPV extends IPSModule
 
     private function computeSatelliteTrend(array $sat): float
     {
-        $ghi = $sat['shortwave_radiation'] ?? [];
+        $ghi = $sat['ghi'];
         $n = count($ghi);
 
         if ($n < 3) return 0.0;
@@ -896,25 +896,41 @@ class OpenMeteoPV extends IPSModule
         // Zeitpunkt Forecast_now suchen
         $now = time();
         $idx = 0; $best = PHP_INT_MAX;
+
         foreach ($times as $i => $t) {
             $d = abs(strtotime($t) - $now);
-            if ($d < $best) { $best = $d; $idx = $i; }
+            if ($d < $best) {
+                $best = $d;
+                $idx = $i;
+            }
         }
 
-        // GHI jetzt: Forecast vs Satellite
+        // Forecast-GHI jetzt:
         $ghi_fc = $fc['hourly']['shortwave_radiation'][$idx] ?? 0;
-        $sat_last = end($sat['shortwave_radiation']);
+
+        // KORREKTUR HIER:
+        $sat_last = end($sat['ghi']);   // statt shortwave_radiation
 
         $bias = $sat_last - $ghi_fc;
 
-        // Glättungsfaktor
         $alpha = 0.7;
 
-        // Korrektur auf ALLE zukünftigen Punkte anwenden
+        $this->debugNowcast("BiasCorrection_before", [
+            "fc_ghi_now" => $ghi_fc,
+            "sat_ghi_now" => $sat_last,
+            "bias" => $bias,
+            "alpha" => $alpha
+        ]);
+
         for ($i = $idx; $i < count($times); $i++) {
             $fc['hourly']['shortwave_radiation'][$i] =
                 max(0, $fc['hourly']['shortwave_radiation'][$i] + $alpha * $bias);
         }
+
+        $this->debugNowcast("BiasCorrection_after", [
+            "corrected_first_hours" => array_slice($fc['hourly']['shortwave_radiation'], $idx, 3),
+            "bias_applied" => $alpha * $bias
+        ]);
 
         return $fc;
     }
