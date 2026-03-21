@@ -604,7 +604,7 @@ class OpenMeteoPV extends IPSModule
         // 7) Finale PV-Berechnung auf den Hybriddaten ----
         // (unverändert, nutzt POA, Masken etc.)
         return $this->computePV_FinalFromDataset($fc);
-    }*/        
+    }        
 
     private function computePV(?array $sat, array $fc): array
     {
@@ -626,6 +626,83 @@ class OpenMeteoPV extends IPSModule
             $fc = $this->applyNowcast($fc, $trend);
 
         // 5) PV final
+        return $this->computePV_FinalFromDataset($fc);
+    }*/
+
+    private function computePV(?array $satRaw, array $fc): array
+    {
+        // 1) Satellite normalisieren (Fix)
+        $sat = $this->normalizeSatelliteNative($this->fetchSatelliteNative());
+
+        // Wenn überhaupt keine brauchbaren Satellitendaten verfügbar → Forecast-only
+        if ($sat === null) {
+            return $this->computePV_FinalFromDataset($fc);
+        }
+
+        // 2) Basisdaten
+        $times = &$fc['hourly']['time'];
+        $ghi   = &$fc['hourly']['shortwave_radiation'];
+        $dni   = &$fc['hourly']['direct_normal_irradiance'];
+        $dhi   = &$fc['hourly']['diffuse_radiation'];
+
+        $cloud = $fc['hourly']['cloud_cover'] ?? [];
+
+        // 3) SATELLITE-BIAS (sanfte Korrektur)
+        $satLast = end($sat['ghi']);
+        $nowIdx  = 0;
+        $best    = PHP_INT_MAX;
+        $nowTs   = time();
+
+        for ($i = 0; $i < count($times); $i++) {
+            $d = abs(strtotime($times[$i]) - $nowTs);
+            if ($d < $best) { $best = $d; $nowIdx = $i; }
+        }
+
+        $ghi_fc_now = $ghi[$nowIdx] ?? 0;
+        $bias       = $satLast - $ghi_fc_now;
+        $bias       = max(-80, min(80, $bias));  // Limit
+
+        // sanftes Aufschieben ab "jetzt"
+        for ($i = $nowIdx; $i < count($times); $i++) {
+            $ghi[$i] = max(0, $ghi[$i] + 0.5 * $bias);
+        }
+
+        // 4) NOWCAST 1–2 Stunden
+
+        $nSat = count($sat['ghi']);
+        $ghi_now = $sat['ghi'][$nSat-1];
+        $ghi_p1  = $sat['ghi'][$nSat-2];
+        $ghi_p2  = $sat['ghi'][$nSat-3];
+
+        $trend = (($ghi_now - $ghi_p1) + ($ghi_p1 - $ghi_p2)) / 2.0;
+        $trend = max(-80, min(80, $trend));  // Trendlimit
+
+        for ($i = 0; $i < count($times); $i++) {
+
+            $dtH = (strtotime($times[$i]) - $nowTs) / 3600.0;
+
+            if ($dtH > 0 && $dtH <= 2.0) {
+
+                // Extrapolation
+                $ghiSat = max(0, $ghi_now + $trend * $dtH);
+
+                // Mischung: 70% Satellite, 30% Forecast
+                $ghi[$i] = 0.7 * $ghiSat + 0.3 * $ghi[$i];
+
+                // DNI korrigieren, falls bedeckt
+                if ($cloud[$i] >= 90 || $ghi[$i] < 150) {
+                    $dni[$i] = 0;
+                    $dhi[$i] = $ghi[$i];
+                }
+
+                $this->SendDebug("Nowcast",
+                    "t={$times[$i]} dt=$dtH trend=$trend ghi_new={$ghi[$i]}",
+                    0
+                );
+            }
+        }
+
+        // 5) normale PV-Berechnung
         return $this->computePV_FinalFromDataset($fc);
     }
 
@@ -941,6 +1018,52 @@ class OpenMeteoPV extends IPSModule
 
         return $clean;
     }   
+
+    private function normalizeSatelliteNative(?array $raw): ?array
+    {
+        if (!is_array($raw) || empty($raw['hourly'])) {
+            return null;
+        }
+
+        $h = $raw['hourly'];
+
+        // Rohwerte holen
+        $times = $h['time'] ?? [];
+        $ghi   = $h['shortwave_radiation'] ?? [];
+        $dni   = $h['direct_normal_irradiance'] ?? [];
+        $dhi   = $h['diffuse_radiation'] ?? [];
+
+        $clean = [
+            "time" => [],
+            "ghi"  => [],
+            "dni"  => [],
+            "dhi"  => []
+        ];
+
+        // Alle gültigen Werte übernehmen
+        for ($i = 0; $i < count($times); $i++) {
+
+            if ($ghi[$i] === null) continue;     // Nullwerte raus
+            if (!is_numeric($ghi[$i])) continue; // Sicherung
+
+            // Negative oder extreme Werte filtern
+            $ghiVal = max(0, min(1500, $ghi[$i]));
+            $dniVal = max(0, min(1500, $dni[$i] ?? 0));
+            $dhiVal = max(0, min(1500, $dhi[$i] ?? 0));
+
+            $clean["time"][] = $times[$i];
+            $clean["ghi"][]  = $ghiVal;
+            $clean["dni"][]  = $dniVal;
+            $clean["dhi"][]  = $dhiVal;
+        }
+
+        // Mindestens 3 Punkte nötig
+        if (count($clean["ghi"]) < 3) {
+            return null;
+        }
+
+        return $clean;
+    }
 
     private function applyBiasCorrection(array $fc, array $sat): array
     {
