@@ -664,6 +664,48 @@ class OpenMeteoPV extends IPSModule
         $dhi   = $fc['hourly']['diffuse_radiation'] ?? [];
         $temp  = $fc['hourly']['temperature_2m'] ?? [];
 
+        // ----------------------------------------------------------------------
+        // PATCH: Cloud-Sanity-Check für unrealistische Open-Meteo Forecastwerte
+        // ----------------------------------------------------------------------
+
+        $times = $fc['hourly']['time'];
+        $ghi   = &$fc['hourly']['shortwave_radiation'];
+        $dni   = &$fc['hourly']['direct_normal_irradiance'];
+        $dhi   = &$fc['hourly']['diffuse_radiation'];
+        $cloud = $fc['hourly']['cloud_cover'] ?? [];
+
+        $n = count($times);
+
+        for ($i = 0; $i < $n; $i++) {
+
+            // Alle Werte vorhanden?
+            if (!isset($ghi[$i]) || !isset($cloud[$i])) {
+                continue;
+            }
+
+            $c = $cloud[$i];
+            $g = $ghi[$i];
+
+            // ---------------------------
+            // Bedingung für "kaputte" Daten:
+            //  - 90-100% Bewölkung
+            //  - aber > 250 W/m² Strahlung (klarer Himmel)
+            // ---------------------------
+            if ($c >= 90 && $g > 250) {
+
+                // Realistische Bedeckungswerte setzen
+                $ghi[$i] = 120;   // Bedeckt: 80–150 W/m² typisch
+                $dni[$i] = 0;     // Keine direkte Strahlung bei schweren Wolken
+                $dhi[$i] = 120;   // Diffus gleich Gesamtradiation
+
+                // Optional Debug
+                $this->SendDebug("CloudSanityPatch",
+                    "Korrigiert: t={$times[$i]}, cloud=$c%, ghi_alt=$g => ghi_neu=120",
+                    0
+                );
+            }
+        }        
+
         $n = count($times);
         if ($n === 0) {
             return [
