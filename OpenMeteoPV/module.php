@@ -144,7 +144,19 @@ class OpenMeteoPV extends IPSModule
                         ['caption' => 'Auto', 'value' => 'auto'],
                         ['caption' => date_default_timezone_get(), 'value' => date_default_timezone_get()]
                     ]
+                ],            
+                [
+                    'type' => 'Select',
+                    'name' => 'WeatherProvider',
+                    'caption' => 'Wetterdaten-Anbieter',
+                    'options' => [
+                        [ 'caption' => 'Open-Meteo', 'value': 'openmeteo' ],
+                        [ 'caption' => 'BASF Agrar Wetter', 'value': 'basf' ],
+                        [ 'caption' => 'Solcast Rooftop', 'value': 'solcast_rooftop' ],
+                        [ 'caption' => 'Solcast Advanced', 'value': 'solcast_advanced' ]
+                    ]
                 ],
+                ["type" => "ValidationTextBox", "name" => "BasfApiKey", "caption" => "BasfApiKey"],
                 ['type' => 'CheckBox', 'name' => 'UseSatellite', 'caption' => 'Satellite Radiation API (EU)'],
                 ['type' => 'NumberSpinner', 'name' => 'ForecastDays', 'caption' => 'Forecast-Tage (1..16)'],
                 ['type' => 'NumberSpinner', 'name' => 'PastDays', 'caption' => 'Vergangenheits-Tage (0..7)'],
@@ -1372,5 +1384,45 @@ class OpenMeteoPV extends IPSModule
         $zenith  = acos($zhor);
         return ['zenith' => $zenith, 'azimuth' => $azimuth];
     }
+
+    private function fetchBasfData(): ?array {
+        $apiKey = $this->ReadPropertyString('BasfApiKey');
+        $lat = $this->ReadPropertyFloat('Latitude');
+        $lon = $this->ReadPropertyFloat('Longitude');
+
+        $url = "https://api.basf.digital/agro-weather/v1/...&lat=$lat&lon=$lon&apikey=$apiKey";
+
+        $j = $this->fetchUrlJson($url);
+        if (!is_array($j) || empty($j['hourly'])) {
+            return null;
+        }
+
+        return [
+            'hourly' => [
+                'time' => $j['hourly']['time'],
+                'shortwave_radiation' => $j['hourly']['radiation'], 
+                'direct_normal_irradiance' => $j['hourly']['dni'] ?? null,
+                'diffuse_radiation' => $j['hourly']['dhi'] ?? null,
+                'temperature_2m' => $j['hourly']['temp'],
+                'cloud_cover' => $j['hourly']['clouds'],
+            ]
+        ];
+    }
+
+    private function fetchWeatherData(): ?array
+    {
+        $provider = $this->ReadPropertyString('WeatherProvider');
+
+        switch ($provider) {
+            case 'basf':
+                return $this->fetchBasfData();
+            case 'solcast_rooftop':
+                return $this->fetchSolcastRooftop();
+            case 'solcast_advanced':
+                return $this->fetchSolcastAdvanced();
+            default:
+                return $this->fetchForecastData(); // Open-Meteo
+        }
+    }    
 }
 ?>
