@@ -98,8 +98,11 @@ class OpenMeteoPV extends IPSModule
         $this->RegisterAttributeString('MosmixAuto', '');
         $this->RegisterAttributeString('NowcastState', '');
 
+        // Eigenes Integer-Profil für Leistung (~Watt ist ein Float-Profil)
+        $this->ensureWattProfile();
+
         // Variablen (gesamt)
-        $this->RegisterVariableInteger('TotalPower_W', 'Leistung (gesamt) [W]', '~Watt', 10);
+        $this->RegisterVariableInteger('TotalPower_W', 'Leistung (gesamt) [W]', 'OMPV.Watt', 10);
         $this->RegisterVariableFloat('RestOfDay_kWh', 'Energie Rest heute [kWh]', '~Electricity', 15);
         $this->RegisterVariableFloat('Today_kWh', 'Energie heute [kWh]', '~Electricity', 20);
         $this->RegisterVariableFloat('Tomorrow_kWh', 'Energie morgen [kWh]', '~Electricity', 21);
@@ -123,7 +126,7 @@ class OpenMeteoPV extends IPSModule
         foreach ($arrays as $i => $a) {
             $name  = (string)($a['Name'] ?? ('Array_' . $i));
             $ident = $this->arrayIdent($name, (int)$i);
-            $this->RegisterVariableInteger($ident . '_Power_W', "Leistung {$name} [W]", '~Watt', $pos++);
+            $this->RegisterVariableInteger($ident . '_Power_W', "Leistung {$name} [W]", 'OMPV.Watt', $pos++);
             $this->RegisterVariableFloat($ident . '_Today_kWh', "Energie heute {$name} [kWh]", '~Electricity', $pos++);
             $this->RegisterVariableString($ident . '_ForecastJSON', "Forecast JSON {$name}", '', $pos++);
             $this->RegisterVariableString($ident . '_HorizonJSON', "Horizon JSON {$name}", '', $pos++);
@@ -1033,6 +1036,15 @@ class OpenMeteoPV extends IPSModule
     /* ============================================================
      *  HELPERS
      * ============================================================ */
+    private function ensureWattProfile(): void
+    {
+        if (!IPS_VariableProfileExists('OMPV.Watt')) {
+            IPS_CreateVariableProfile('OMPV.Watt', 1);   // 1 = Integer
+            IPS_SetVariableProfileText('OMPV.Watt', '', ' W');
+            IPS_SetVariableProfileIcon('OMPV.Watt', 'Electricity');
+        }
+    }
+
     private function getArrays(): array
     {
         $a = json_decode($this->ReadPropertyString('Arrays'), true);
