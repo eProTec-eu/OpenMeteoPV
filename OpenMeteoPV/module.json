@@ -4,12 +4,13 @@
   "type": 3,
   "vendor": "eprotec",
   "aliases": [
-    "PV Forecast (OpenMeteo)"
+    "PV Forecast (OpenMeteo)",
+    "PV Forecast (DWD MOSMIX / Open-Meteo)"
   ],
   "url": "https://github.com/eProTec-eu/OpenMeteoPV.git",
   "parentRequirements": [],
   "childRequirements": [],
   "implemented": [],
-  "version": "1.6.0",
+  "version": "2.0.0",
   "prefix": "OMPV"
 }
