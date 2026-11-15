@@ -17,6 +17,8 @@ declare(strict_types=1);
  *    werden energieerhaltend über cos(Zenit) auf die Teilschritte verteilt.
  *  - Nowcast: Verhältnis gemessene/prognostizierte Leistung im letzten Zeitfenster; die Korrektur läuft
  *    über die Wirkdauer mit einer Cosinus-Rampe auf 1 aus.
+ *  - Zeitreihe (Forecast_TS): gleichmäßiges Raster, Unix-Zeit (UTC), Wert = mittlere Leistung [W] des
+ *    Intervalls ab start_ts + i·interval_s. Format kompatibel zu Lib\TimeSeries (lib_core), Version 1.
  */
 class OpenMeteoPV extends IPSModule
 {
@@ -27,7 +29,10 @@ class OpenMeteoPV extends IPSModule
     private const K_MIN          = 0.1;
     private const K_MAX          = 2.0;
 
-    private const GLOBAL_IDENTS = ['TotalPower_W', 'RestOfDay_kWh', 'Today_kWh', 'Tomorrow_kWh', 'DayAfter_kWh', 'NowcastFactor', 'ForecastJSON'];
+    private const GLOBAL_IDENTS = ['TotalPower_W', 'RestOfDay_kWh', 'Today_kWh', 'Tomorrow_kWh', 'DayAfter_kWh', 'NowcastFactor', 'ForecastJSON', 'Forecast_TS'];
+
+    private const TS_VERSION   = 1;
+    private const TS_INTERVALS = [900, 1800, 3600];
 
     /* ============================================================
      *  LIFECYCLE
@@ -53,6 +58,10 @@ class OpenMeteoPV extends IPSModule
         $this->RegisterPropertyInteger('UpdateMinutes', 60);       // Abruf der Wetterprognose
         $this->RegisterPropertyInteger('RecalcMinutes', 5);        // Neuberechnung inkl. Nowcast
         $this->RegisterPropertyInteger('SubSteps', 12);            // Teilschritte pro Stunde (min. 4)
+
+        // Zeitreihe für das Energiemanagement
+        $this->RegisterPropertyInteger('TSInterval', 900);         // Raster [s]: 900 | 1800 | 3600
+        $this->RegisterPropertyBoolean('TSPerString', false);      // zusätzlich je String
 
         // Nowcast über Messwert
         $this->RegisterPropertyBoolean('EnableNowcast', true);
@@ -109,6 +118,7 @@ class OpenMeteoPV extends IPSModule
         $this->RegisterVariableFloat('DayAfter_kWh', 'Energie übermorgen [kWh]', '~Electricity', 22);
         $this->RegisterVariableFloat('NowcastFactor', 'Nowcast-Faktor', '', 80);
         $this->RegisterVariableString('ForecastJSON', 'Forecast JSON (gesamt)', '', 90);
+        $this->RegisterVariableString('Forecast_TS', 'Prognose Zeitreihe (gesamt)', '', 91);
 
         // Timer (Name 'OMPV_Update' aus v1.x beibehalten)
         $this->RegisterTimer('OMPV_Update', 0, 'IPS_RequestAction($_IPS["TARGET"], "Update", 0);');
@@ -123,6 +133,7 @@ class OpenMeteoPV extends IPSModule
         $arrays = $this->getArrays();
         $valid  = self::GLOBAL_IDENTS;
         $pos    = 30;
+        $perStr = $this->ReadPropertyBoolean('TSPerString');
         foreach ($arrays as $i => $a) {
             $name  = (string)($a['Name'] ?? ('Array_' . $i));
             $ident = $this->arrayIdent($name, (int)$i);
@@ -131,7 +142,12 @@ class OpenMeteoPV extends IPSModule
             $this->RegisterVariableString($ident . '_ForecastJSON', "Forecast JSON {$name}", '', $pos++);
             $this->RegisterVariableString($ident . '_HorizonJSON', "Horizon JSON {$name}", '', $pos++);
             $this->RegisterVariableString($ident . '_DiagJSON', "Diagnose JSON {$name}", '', $pos++);
+            // Zeitreihe je String: wird bei Abwahl gelöscht (enthält nur berechnete Daten)
+            $this->MaintainVariable($ident . '_TS', "Prognose Zeitreihe {$name}", VARIABLETYPE_STRING, '', $pos++, $perStr);
             array_push($valid, $ident . '_Power_W', $ident . '_Today_kWh', $ident . '_ForecastJSON', $ident . '_HorizonJSON', $ident . '_DiagJSON');
+            if ($perStr) {
+                $valid[] = $ident . '_TS';
+            }
         }
         $this->reportOrphans($valid);   // nur melden – Löschen bleibt dem Anwender überlassen
 
@@ -186,6 +202,13 @@ class OpenMeteoPV extends IPSModule
                     ['type' => 'NumberSpinner', 'name' => 'RecalcMinutes', 'caption' => 'Neuberechnung inkl. Nowcast (min)', 'minimum' => 1, 'maximum' => 60],
                     ['type' => 'NumberSpinner', 'name' => 'SubSteps', 'caption' => 'Teilschritte pro Stunde (4..60)', 'minimum' => 4, 'maximum' => 60],
                     ['type' => 'NumberSpinner', 'name' => 'Albedo', 'caption' => 'Albedo (0..1)', 'digits' => 2, 'minimum' => 0, 'maximum' => 1],
+                ]],
+                ['type' => 'ExpansionPanel', 'caption' => 'Zeitreihe (Energiemanagement)', 'items' => [
+                    ['type' => 'Select', 'name' => 'TSInterval', 'caption' => 'Raster', 'options' => [
+                        ['caption' => '15 min', 'value' => 900], ['caption' => '30 min', 'value' => 1800], ['caption' => '60 min', 'value' => 3600]
+                    ]],
+                    ['type' => 'CheckBox', 'name' => 'TSPerString', 'caption' => 'Zusätzlich eine Zeitreihe je String'],
+                    ['type' => 'Label', 'caption' => 'Variable Forecast_TS: heute 00:00 bis Ende übermorgen, mittlere Leistung [W] je Intervall, Unix-Zeit (UTC), inkl. Nowcast.'],
                 ]],
                 ['type' => 'ExpansionPanel', 'caption' => 'Nowcast (Korrektur über Messwert)', 'items' => [
                     ['type' => 'CheckBox', 'name' => 'EnableNowcast', 'caption' => 'Nowcast aktiv'],
@@ -288,6 +311,13 @@ class OpenMeteoPV extends IPSModule
             $this->SetValue('DayAfter_kWh', round($r['daily'][2], 2));
             $this->SetValue('ForecastJSON', json_encode($r['json_total'], JSON_UNESCAPED_SLASHES));
 
+            $created = time();
+            $issued  = (int)($this->loadCache()['fetched'] ?? 0);
+            $source  = $this->sourceLabel();
+            $this->SetValue('Forecast_TS', json_encode(
+                self::toTimeSeries($r['ts_total'], $r['ts_interval'], $source, $created, $issued), JSON_UNESCAPED_SLASHES));
+            $perStr = $this->ReadPropertyBoolean('TSPerString');
+
             foreach ($r['strings'] as $ident => $d) {
                 if (@$this->GetIDForIdent($ident . '_Power_W') === false) {
                     continue;
@@ -297,6 +327,10 @@ class OpenMeteoPV extends IPSModule
                 $this->SetValue($ident . '_ForecastJSON', json_encode($d['json'], JSON_UNESCAPED_SLASHES));
                 $this->SetValue($ident . '_HorizonJSON', json_encode($d['horizon'], JSON_UNESCAPED_SLASHES));
                 $this->SetValue($ident . '_DiagJSON', json_encode($d['diag'], JSON_UNESCAPED_SLASHES));
+                if ($perStr && @$this->GetIDForIdent($ident . '_TS') !== false) {
+                    $this->SetValue($ident . '_TS', json_encode(
+                        self::toTimeSeries($d['ts'], $r['ts_interval'], $source . '#' . $ident, $created, $issued), JSON_UNESCAPED_SLASHES));
+                }
             }
         } catch (\Throwable $e) {
             $this->SendDebug('Recalc ERROR', $e->getMessage() . ' @' . $e->getLine(), 0);
@@ -805,10 +839,16 @@ class OpenMeteoPV extends IPSModule
         $dS = $this->ReadPropertyInteger('DiagStartHour');
         $dE = $this->ReadPropertyInteger('DiagEndHour');
 
+        // Zeitreihe: Raster und Zeitraum (heute 00:00 bis Ende übermorgen)
+        $tsInt  = in_array($this->ReadPropertyInteger('TSInterval'), self::TS_INTERVALS, true) ? $this->ReadPropertyInteger('TSInterval') : 900;
+        $tsFrom = $t0;
+        $tsTo   = strtotime('+3 days', $t0);
+        $tsAcc  = [];           // slot => [Σ W·s, Σ s]  (gesamt)
+
         $nS = count($strings);
         $st = [];
         foreach ($strings as $j => $s) {
-            $st[$j] = ['series' => [], 'daily' => [], 'now_w' => 0.0, 'diag' => []];
+            $st[$j] = ['series' => [], 'daily' => [], 'now_w' => 0.0, 'diag' => [], 'ts' => []];
         }
         $jsonTotal = [];
         $daily     = [];
@@ -887,6 +927,17 @@ class OpenMeteoPV extends IPSModule
                 if ($t <= $now && $t > $now - 7200) {
                     $subTotals[] = [$t, $total];
                 }
+
+                // Zeitreihe: Teilschritt dem Intervall seiner Mitte zuordnen (energieerhaltend)
+                if ($t >= $tsFrom && $t < $tsTo) {
+                    $slot = intdiv($t - $tsFrom, $tsInt) * $tsInt + $tsFrom;
+                    $tsAcc[$slot][0] = ($tsAcc[$slot][0] ?? 0.0) + $total * $dt;
+                    $tsAcc[$slot][1] = ($tsAcc[$slot][1] ?? 0.0) + $dt;
+                    foreach ($p as $j => $w) {
+                        $st[$j]['ts'][$slot][0] = ($st[$j]['ts'][$slot][0] ?? 0.0) + $w * $dt;
+                        $st[$j]['ts'][$slot][1] = ($st[$j]['ts'][$slot][1] ?? 0.0) + $dt;
+                    }
+                }
             }
 
             // Stundenwerte (Mittel über die Teilschritte = kWh dieser Stunde)
@@ -918,6 +969,7 @@ class OpenMeteoPV extends IPSModule
                 'json'      => $st[$j]['series'],
                 'horizon'   => $s['maskRaw'],
                 'diag'      => $st[$j]['diag'],
+                'ts'        => $st[$j]['ts'],
             ];
         }
 
@@ -928,6 +980,8 @@ class OpenMeteoPV extends IPSModule
             'strings'    => $stringsOut,
             'json_total' => $jsonTotal,
             'sub_totals' => $subTotals,
+            'ts_total'   => $tsAcc,
+            'ts_interval'=> $tsInt,
         ];
     }
 
@@ -1031,6 +1085,53 @@ class OpenMeteoPV extends IPSModule
         }
         // ohne Archiv: aktueller Wert
         return max(0.0, (float)GetValue($varID) * $factor);
+    }
+
+    /* ============================================================
+     *  ZEITREIHE
+     * ============================================================ */
+
+    /**
+     * Akkumulierte Intervalle [slot => [Σ W·s, Σ s]] → Zeitreihe (Format v1, kompatibel zu Lib\TimeSeries).
+     * Lücken im Raster werden mit null gefüllt. Teilweise abgedeckte Intervalle (Datenbeginn/-ende)
+     * erhalten den Mittelwert über den abgedeckten Teil.
+     */
+    private static function toTimeSeries(array $acc, int $interval, string $source, int $created, int $issued): array
+    {
+        ksort($acc);
+        $values = [];
+        $start  = $acc === [] ? 0 : (int)array_key_first($acc);
+        if ($acc !== []) {
+            $last = (int)array_key_last($acc);
+            for ($slot = $start; $slot <= $last; $slot += $interval) {
+                $a = $acc[$slot] ?? null;
+                $values[] = ($a === null || $a[1] <= 0) ? null : round($a[0] / $a[1], 1);
+            }
+        }
+        return [
+            'version'    => self::TS_VERSION,
+            'source'     => $source,
+            'created_ts' => $created,
+            'issued_ts'  => $issued,          // Abruf der Wetterdaten (0 = unbekannt)
+            'start_ts'   => $start,
+            'interval_s' => $interval,
+            'unit'       => 'W',
+            'values'     => $values,
+        ];
+    }
+
+    /** Quellenkennung für die Zeitreihe */
+    private function sourceLabel(): string
+    {
+        if ($this->ReadPropertyString('DataSource') === 'openmeteo') {
+            return 'open-meteo';
+        }
+        $station = strtoupper(trim($this->ReadPropertyString('MosmixStation')));
+        if ($station === '') {
+            $attr = json_decode($this->ReadAttributeString('MosmixAuto'), true);
+            $station = is_array($attr) ? (string)($attr['id'] ?? '') : '';
+        }
+        return 'dwd-mosmix' . ($station !== '' ? ':' . $station : '');
     }
 
     /* ============================================================

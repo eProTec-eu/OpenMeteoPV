@@ -19,9 +19,36 @@
 | `Today_kWh` / `Tomorrow_kWh` / `DayAfter_kWh` | Tagesprognosen |
 | `NowcastFactor` | aktueller Korrekturfaktor (1 = keine Korrektur) |
 | `ForecastJSON` | Stundenwerte gesamt `[{t, p_w, e_kwh}]`, `t` = Intervallende |
-| `<STRING>_<n>_*` | je String: Leistung jetzt, Energie heute, Forecast‑, Horizont‑ und Diagnose‑JSON |
+| `Forecast_TS` | **Zeitreihe für das Energiemanagement** (siehe unten), heute 00:00 bis Ende übermorgen |
+| `<STRING>_<n>_*` | je String: Leistung jetzt, Energie heute, Forecast‑, Horizont‑ und Diagnose‑JSON; optional `_TS` (Zeitreihe) |
 
 Variablen umbenannter oder entfernter Strings werden **nicht** gelöscht. Das Modul meldet sie im Meldungsfenster, löschen kann man sie dann von Hand.
+
+### Zeitreihe (`Forecast_TS`)
+Gleichmäßiges Raster für Energiemanagement-Skripte, Format kompatibel zu `Lib\TimeSeries` (lib_core):
+
+```json
+{
+  "version": 1,
+  "source": "dwd-mosmix:10224",
+  "created_ts": 1794790800,
+  "issued_ts": 1794787500,
+  "start_ts": 1794697200,
+  "interval_s": 900,
+  "unit": "W",
+  "values": [0, 0, 382.7, 887.6, 1360.4]
+}
+```
+
+| Feld | Bedeutung |
+|---|---|
+| `start_ts` | Beginn des ersten Intervalls, Unix-Zeit (UTC) = heute 00:00 Ortszeit |
+| `interval_s` | Raster: 900, 1800 oder 3600 s (Einstellung „Zeitreihe“) |
+| `values` | **mittlere Leistung [W]** im Intervall `start_ts + i·interval_s` (Beginn) – nicht Energie; inkl. Nowcast und WR-Begrenzung |
+| `created_ts` | Zeitpunkt der Berechnung |
+| `issued_ts` | Abruf der Wetterdaten (zur Prüfung, ob die Prognose veraltet ist) |
+
+Die Werte entstehen energieerhaltend aus den Teilschritten. Die Summe der Intervallenergien eines Tages entspricht `Today_kWh` bzw. `Tomorrow_kWh`. Optional gibt es zusätzlich eine Zeitreihe je String (`<STRING>_<n>_TS`); bei Abwahl werden diese Variablen gelöscht.
 
 ## Konfiguration
 
