@@ -46,7 +46,7 @@ Gleichmäßiges Raster für Energiemanagement-Skripte, Format kompatibel zu `Lib
 | `interval_s` | Raster: 900, 1800 oder 3600 s (Einstellung „Zeitreihe“) |
 | `values` | **mittlere Leistung [W]** im Intervall `start_ts + i·interval_s` (Beginn) – nicht Energie; inkl. Nowcast und WR-Begrenzung |
 | `created_ts` | Zeitpunkt der Berechnung |
-| `issued_ts` | Abruf der Wetterdaten (zur Prüfung, ob die Prognose veraltet ist) |
+| `issued_ts` | Ausgabezeitpunkt der Wetterprognose: bei MOSMIX der Modelllauf (`IssueTime` aus der KML), bei Open‑Meteo der Abruf. Zur Prüfung, ob die Prognose veraltet ist |
 
 Die Werte entstehen energieerhaltend aus den Teilschritten. Die Summe der Intervallenergien eines Tages entspricht `Today_kWh` bzw. `Tomorrow_kWh`. Optional gibt es zusätzlich eine Zeitreihe je String (`<STRING>_<n>_TS`); bei Abwahl werden diese Variablen gelöscht.
 
@@ -97,7 +97,7 @@ Das ältere Feld `InverterLimit_kW` je String wird weiterhin unterstützt, sofer
 ## Modellbeschreibung
 1. Stundenmittel der Globalstrahlung (MOSMIX: `Rad1h` in kJ/m² ÷ 3,6 = W/m²; Open‑Meteo: `shortwave_radiation`)
 2. Aufteilung in Direkt‑ und Diffusstrahlung: Open‑Meteo liefert `diffuse_radiation`, bei MOSMIX schätzt das Modul sie mit dem **Erbs‑Modell** aus dem Klarheitsindex
-3. Verteilung auf die Teilschritte proportional zu cos(Zenit). Die Direktnormalstrahlung wird auf 115 % der Klarhimmel‑DNI begrenzt; der abgeschnittene Teil geht in die Diffusstrahlung über.
+3. Verteilung auf die Teilschritte (Standard, „Stetiger Verlauf“): Klarheitsindex kt und Diffusanteil verlaufen je Stunde stückweise linear über Stundenbeginn, ‑mitte und ‑ende. Benachbarte Stunden teilen sich den Randwert, sodass der Verlauf über die Stundengrenzen stetig ist; die Mitte wird so gewählt, dass das Stundenmittel erhalten bleibt. GHI = kt(t) · cos(Zenit), anschließend je Stunde exakt auf GHI‑ und Diffus‑Stundenmittel skaliert. Ohne diese Option (Verhalten bis 2.1): DNI konstant je Stunde, Verteilung ∝ cos(Zenit) – das erzeugt Sprünge an den vollen Stunden. In beiden Fällen wird die Direktnormalstrahlung auf 115 % der Klarhimmel‑DNI begrenzt; der abgeschnittene Teil geht in die Diffusstrahlung über.
 4. Einstrahlung auf die Modulfläche (isotropes Himmelsmodell): direkt × cos θ (sofern über dem Horizont) + diffus × Himmelsanteil × (1+cos β)/2 + GHI × Albedo × (1−cos β)/2
 5. Zelltemperatur nach NOCT, Leistung = kWp × POA × Verlustfaktor × (1 + γ·(T − 25 °C))
 6. Nowcast‑Faktor, danach AC‑Begrenzung je Wechselrichter

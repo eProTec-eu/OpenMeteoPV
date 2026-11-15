@@ -32,6 +32,9 @@ class OpenMeteoPV extends IPSModule
     private const GLOBAL_IDENTS = ['TotalPower_W', 'RestOfDay_kWh', 'Today_kWh', 'Tomorrow_kWh', 'DayAfter_kWh', 'NowcastFactor', 'ForecastJSON', 'Forecast_TS'];
 
     private const TS_VERSION   = 1;
+
+    /** Ausgabezeitpunkt der zuletzt abgerufenen Prognose (nur innerhalb eines Update-Aufrufs) */
+    private ?int $issuedTs = null;
     private const TS_INTERVALS = [900, 1800, 3600];
 
     /* ============================================================
@@ -58,6 +61,7 @@ class OpenMeteoPV extends IPSModule
         $this->RegisterPropertyInteger('UpdateMinutes', 60);       // Abruf der Wetterprognose
         $this->RegisterPropertyInteger('RecalcMinutes', 5);        // Neuberechnung inkl. Nowcast
         $this->RegisterPropertyInteger('SubSteps', 12);            // Teilschritte pro Stunde (min. 4)
+        $this->RegisterPropertyBoolean('SmoothIrradiance', true);  // stetiger Verlauf über Stundengrenzen
 
         // Zeitreihe für das Energiemanagement
         $this->RegisterPropertyInteger('TSInterval', 900);         // Raster [s]: 900 | 1800 | 3600
@@ -201,6 +205,7 @@ class OpenMeteoPV extends IPSModule
                     ['type' => 'NumberSpinner', 'name' => 'UpdateMinutes', 'caption' => 'Abruf Wetterprognose (min)', 'minimum' => 10],
                     ['type' => 'NumberSpinner', 'name' => 'RecalcMinutes', 'caption' => 'Neuberechnung inkl. Nowcast (min)', 'minimum' => 1, 'maximum' => 60],
                     ['type' => 'NumberSpinner', 'name' => 'SubSteps', 'caption' => 'Teilschritte pro Stunde (4..60)', 'minimum' => 4, 'maximum' => 60],
+                    ['type' => 'CheckBox', 'name' => 'SmoothIrradiance', 'caption' => 'Stetiger Verlauf über Stundengrenzen (Klarheitsindex interpolieren)'],
                     ['type' => 'NumberSpinner', 'name' => 'Albedo', 'caption' => 'Albedo (0..1)', 'digits' => 2, 'minimum' => 0, 'maximum' => 1],
                 ]],
                 ['type' => 'ExpansionPanel', 'caption' => 'Zeitreihe (Energiemanagement)', 'items' => [
@@ -312,11 +317,11 @@ class OpenMeteoPV extends IPSModule
             $this->SetValue('ForecastJSON', json_encode($r['json_total'], JSON_UNESCAPED_SLASHES));
 
             $created = time();
-            $issued  = (int)($this->loadCache()['fetched'] ?? 0);
+            $cache   = $this->loadCache();
+            $issued  = (int)($cache['issued'] ?? $cache['fetched'] ?? 0);
             $source  = $this->sourceLabel();
-            $this->SetValue('Forecast_TS', json_encode(
-                self::toTimeSeries($r['ts_total'], $r['ts_interval'], $source, $created, $issued), JSON_UNESCAPED_SLASHES));
-            $perStr = $this->ReadPropertyBoolean('TSPerString');
+            $perStr  = $this->ReadPropertyBoolean('TSPerString');
+            $this->writeTimeSeries('Forecast_TS', $r['ts_total'], $r['ts_interval'], $source, $created, $issued);
 
             foreach ($r['strings'] as $ident => $d) {
                 if (@$this->GetIDForIdent($ident . '_Power_W') === false) {
@@ -328,8 +333,7 @@ class OpenMeteoPV extends IPSModule
                 $this->SetValue($ident . '_HorizonJSON', json_encode($d['horizon'], JSON_UNESCAPED_SLASHES));
                 $this->SetValue($ident . '_DiagJSON', json_encode($d['diag'], JSON_UNESCAPED_SLASHES));
                 if ($perStr && @$this->GetIDForIdent($ident . '_TS') !== false) {
-                    $this->SetValue($ident . '_TS', json_encode(
-                        self::toTimeSeries($d['ts'], $r['ts_interval'], $source . '#' . $ident, $created, $issued), JSON_UNESCAPED_SLASHES));
+                    $this->writeTimeSeries($ident . '_TS', $d['ts'], $r['ts_interval'], $source . '#' . $ident, $created, $issued);
                 }
             }
         } catch (\Throwable $e) {
@@ -372,6 +376,7 @@ class OpenMeteoPV extends IPSModule
         if ($p === null) {
             return null;
         }
+        $this->issuedTs = $p['issued'] ?? null;
 
         $out = [];
         foreach ($p['ts'] as $i => $ts) {
@@ -417,7 +422,11 @@ class OpenMeteoPV extends IPSModule
             $ts[] = $t;
         }
 
-        $res = ['ts' => $ts];
+        $res = ['ts' => $ts, 'issued' => null];
+        if (preg_match('#<dwd:IssueTime>\s*([^<\s]+)\s*</dwd:IssueTime>#', $kml, $it)) {
+            $issued = strtotime($it[1]);
+            $res['issued'] = ($issued === false) ? null : $issued;
+        }
         foreach (['Rad1h', 'TTT'] as $el) {
             $res[$el] = [];
             if (preg_match('#<dwd:Forecast\s+dwd:elementName="' . $el . '"\s*>\s*<dwd:value>([^<]*)</dwd:value>#', $kml, $mm)) {
@@ -598,6 +607,7 @@ class OpenMeteoPV extends IPSModule
             $out[(int)$t] = [(float)$g, $d === null ? null : (float)$d, $tt === null ? null : (float)$tt, $cl === null ? null : (float)$cl];
         }
         $this->SendDebug('Open-Meteo', 'Punkte=' . count($out), 0);
+        $this->issuedTs = time();       // Open-Meteo liefert keinen Ausgabezeitpunkt
         return $out;
     }
 
@@ -645,7 +655,12 @@ class OpenMeteoPV extends IPSModule
             }
         }
         ksort($data);
-        $this->WriteAttributeString('ForecastCache', json_encode(['key' => $this->sourceKey(), 'fetched' => time(), 'data' => $data]));
+        $this->WriteAttributeString('ForecastCache', json_encode([
+            'key'     => $this->sourceKey(),
+            'fetched' => time(),
+            'issued'  => $this->issuedTs ?? time(),    // Modelllauf (MOSMIX IssueTime) bzw. Abruf
+            'data'    => $data
+        ]));
     }
 
     private function cacheToSeries(array $data): array
@@ -679,8 +694,10 @@ class OpenMeteoPV extends IPSModule
         $dt  = 3600.0 / $S;
         $lat = deg2rad($this->ReadPropertyFloat('Latitude'));
         $lon = deg2rad($this->ReadPropertyFloat('Longitude'));
+        $smooth = $this->ReadPropertyBoolean('SmoothIrradiance');
 
-        $hours = [];
+        /* ---- 1. Durchlauf: Sonnenstand je Teilschritt, Stundenkennwerte ---- */
+        $info = [];
         foreach ($series as $h) {
             $start = $h['ts'] - 3600;
             $subs  = [];
@@ -695,11 +712,11 @@ class OpenMeteoPV extends IPSModule
             }
             $meanCos = $sumCos / $S;
             $ghi     = max(0.0, $h['ghi']);
+            $doy     = (int)date('z', $h['ts'] - 1800) + 1;
+            $e0      = 1.0 + 0.033 * cos(2.0 * M_PI * $doy / 365.0);
 
+            $dhi = 0.0;
             if ($ghi > 0.0 && $meanCos > 1e-4) {
-                $doy = (int)date('z', $h['ts'] - 1800) + 1;
-                $e0  = 1.0 + 0.033 * cos(2.0 * M_PI * $doy / 365.0);
-
                 if ($h['dhi'] !== null) {
                     $dhi = $h['dhi'];
                 } else {
@@ -710,32 +727,193 @@ class OpenMeteoPV extends IPSModule
                     $dhi = $ghi;            // Sonne nur knapp über dem Horizont: alles diffus
                 }
                 $dhi = max(0.0, min($ghi, $dhi));
-                $bhi = $ghi - $dhi;
-
-                // DNI konstant über die Stunde (energieerhaltend), begrenzt auf Klarhimmel-DNI
-                $dniRaw = $bhi / $meanCos;
-                $lost   = 0.0;
-                foreach ($subs as &$sub) {
-                    if ($sub['cosZ'] <= 0.0) {
-                        continue;
-                    }
-                    $cap = 1.15 * $this->clearSkyDni($sub['zen'], $e0);
-                    $sub['dni'] = min($dniRaw, $cap);
-                    $lost += ($dniRaw - $sub['dni']) * $sub['cosZ'];
-                }
-                unset($sub);
-                $difHour = $dhi + $lost / $S;          // abgeschnittene Direktstrahlung → diffus
-
-                foreach ($subs as &$sub) {
-                    $w = $sub['cosZ'] / $meanCos;
-                    $sub['dif'] = $difHour * $w;
-                    $sub['ghi'] = $ghi * $w;
-                }
-                unset($sub);
             }
-            $hours[] = ['ts' => $h['ts'], 'temp' => $h['temp'], 'ghi' => $ghi, 'sub' => $subs];
+
+            // Stützwerte für die Glättung (nur bei ausreichend hoher Sonne aussagekräftig)
+            $anchor = $meanCos >= 0.05;
+            $info[] = [
+                'ts' => $h['ts'], 'temp' => $h['temp'], 'ghi' => $ghi, 'dhi' => $dhi, 'e0' => $e0,
+                'meanCos' => $meanCos, 'subs' => $subs,
+                'kt' => $anchor ? max(0.0, min(1.2, $ghi / (self::SOLAR_CONST * $e0 * $meanCos))) : null,
+                'fd' => ($anchor && $ghi > 0.0) ? $dhi / $ghi : null,
+                'ktP' => null,
+                'fdP' => null,
+            ];
+        }
+
+        /* ---- 2. Stetige, mittelwerttreue Profile für kt und Diffusanteil ---- */
+        if ($smooth) {
+            $ktP = $this->meanPreservingProfiles($info, 'kt');
+            $fdP = $this->meanPreservingProfiles($info, 'fd');
+            foreach ($info as $i => &$hi) {
+                $hi['ktP'] = $ktP[$i];
+                $hi['fdP'] = $fdP[$i];
+            }
+            unset($hi);
+        }
+
+        /* ---- 3. Verteilung auf die Teilschritte ---- */
+        $hours = [];
+        foreach ($info as $i => $hi) {
+            $subs    = $hi['subs'];
+            $ghi     = $hi['ghi'];
+            $dhi     = $hi['dhi'];
+            $meanCos = $hi['meanCos'];
+            $e0      = $hi['e0'];
+
+            if ($ghi > 0.0 && $meanCos > 1e-4) {
+                if ($smooth && $hi['ktP'] !== null) {
+                    $this->distributeSmooth($subs, $hi, $S);
+                } else {
+                    $this->distributeHourly($subs, $ghi, $dhi, $meanCos, $e0, $S);
+                }
+            }
+            $hours[] = ['ts' => $hi['ts'], 'temp' => $hi['temp'], 'ghi' => $ghi, 'sub' => $subs];
         }
         return ['S' => $S, 'dt' => $dt, 'hours' => $hours];
+    }
+
+    /**
+     * Bisherige Verteilung (je Stunde für sich): DNI konstant über die Stunde, Diffus ∝ cos(Zenit).
+     * Führt bei 15-min-Auflösung zu Sprüngen an den Stundengrenzen.
+     */
+    private function distributeHourly(array &$subs, float $ghi, float $dhi, float $meanCos, float $e0, int $S): void
+    {
+        $bhi    = $ghi - $dhi;
+        $dniRaw = $bhi / $meanCos;
+        $lost   = 0.0;
+        foreach ($subs as &$sub) {
+            if ($sub['cosZ'] <= 0.0) {
+                continue;
+            }
+            $cap = 1.15 * $this->clearSkyDni($sub['zen'], $e0);
+            $sub['dni'] = min($dniRaw, $cap);
+            $lost += ($dniRaw - $sub['dni']) * $sub['cosZ'];
+        }
+        unset($sub);
+        $difHour = $dhi + $lost / $S;          // abgeschnittene Direktstrahlung → diffus
+
+        foreach ($subs as &$sub) {
+            $w = $sub['cosZ'] / $meanCos;
+            $sub['dif'] = $difHour * $w;
+            $sub['ghi'] = $ghi * $w;
+        }
+        unset($sub);
+    }
+
+    /**
+     * Stückweise lineare Profile [links, Mitte, rechts] je Stunde, Stützstellen bei Stundenbeginn,
+     * -mitte und -ende. Benachbarte Stunden teilen sich den Randwert (stetig); die Mitte wird so
+     * gewählt, dass das Stundenmittel exakt dem Stundenwert entspricht. Würde die Mitte negativ,
+     * werden beide Randwerte der Stunde abgesenkt (und damit auch die der Nachbarn) – iterativ.
+     *
+     * @return array<int, array{0:float,1:float,2:float}|null>  null = Stunde ohne Stützwert
+     */
+    private function meanPreservingProfiles(array $info, string $key): array
+    {
+        $n = count($info);
+        $v = array_map(fn($h) => $h[$key] === null ? null : (float)$h[$key], $info);
+        $L = $R = array_fill(0, $n, 0.0);
+        $linked = array_fill(0, $n, false);    // Stunde i teilt ihren linken Rand mit Stunde i-1
+        for ($i = 0; $i < $n; $i++) {
+            if ($v[$i] === null) {
+                continue;
+            }
+            $L[$i] = $R[$i] = $v[$i];
+            if ($i > 0 && $v[$i - 1] !== null && $info[$i - 1]['ts'] === $info[$i]['ts'] - 3600) {
+                $linked[$i] = true;
+                $L[$i] = $R[$i - 1] = ($v[$i - 1] + $v[$i]) / 2.0;
+            }
+        }
+        for ($iter = 0; $iter < 20; $iter++) {
+            $changed = false;
+            for ($i = 0; $i < $n; $i++) {
+                if ($v[$i] === null || ($L[$i] + $R[$i]) <= 4.0 * $v[$i] + 1e-9) {
+                    continue;                   // Mitte ≥ 0
+                }
+                $f = ($L[$i] + $R[$i]) > 0.0 ? 4.0 * $v[$i] / ($L[$i] + $R[$i]) : 0.0;
+                $L[$i] *= $f;
+                $R[$i] *= $f;
+                if ($linked[$i]) {
+                    $R[$i - 1] = $L[$i];
+                }
+                if ($i < $n - 1 && $linked[$i + 1]) {
+                    $L[$i + 1] = $R[$i];
+                }
+                $changed = true;
+            }
+            if (!$changed) {
+                break;
+            }
+        }
+        $out = [];
+        for ($i = 0; $i < $n; $i++) {
+            $out[$i] = $v[$i] === null ? null : [$L[$i], max(0.0, (4.0 * $v[$i] - $L[$i] - $R[$i]) / 2.0), $R[$i]];
+        }
+        return $out;
+    }
+
+    /**
+     * Geglättete Verteilung: kt(t)·cos(Zenit) bzw. Diffusanteil(t) aus den stetigen Profilen,
+     * anschließend je Stunde auf GHI- und Diffus-Stundenmittel skaliert (energieerhaltend).
+     */
+    private function distributeSmooth(array &$subs, array $hi, int $S): void
+    {
+        $t0 = $hi['ts'] - 3600;
+        $at = function (array $p, int $t) use ($t0): float {
+            $x = max(0.0, min(1.0, ($t - $t0) / 3600.0));
+            return ($x < 0.5) ? $p[0] + ($p[1] - $p[0]) * $x * 2.0 : $p[1] + ($p[2] - $p[1]) * ($x - 0.5) * 2.0;
+        };
+        $ktP = $hi['ktP'];
+
+        // GHI-Verlauf: kt(t) · cos(Zenit), auf das Stundenmittel skaliert
+        $raw = [];
+        $sum = 0.0;
+        foreach ($subs as $k => $sub) {
+            $raw[$k] = $sub['cosZ'] > 0.0 ? max(0.0, $at($ktP, $sub['t'])) * $sub['cosZ'] : 0.0;
+            $sum += $raw[$k];
+        }
+        if ($sum <= 0.0) {
+            $this->distributeHourly($subs, $hi['ghi'], $hi['dhi'], $hi['meanCos'], $hi['e0'], $S);
+            return;
+        }
+        $scale = $hi['ghi'] * $S / $sum;
+
+        // Diffusanteil interpolieren, auf das Diffus-Stundenmittel skalieren
+        $fdOwn = $hi['fd'] ?? ($hi['ghi'] > 0.0 ? $hi['dhi'] / $hi['ghi'] : 1.0);
+        $fdP   = $hi['fdP'] ?? [$fdOwn, $fdOwn, $fdOwn];
+        $difRaw = [];
+        $difSum = 0.0;
+        foreach ($subs as $k => $sub) {
+            $g  = $raw[$k] * $scale;
+            $fd = $at($fdP, $sub['t']);
+            $difRaw[$k] = max(0.0, min(1.0, $fd)) * $g;
+            $difSum += $difRaw[$k];
+        }
+        $dScale = $difSum > 0.0 ? $hi['dhi'] * $S / $difSum : 0.0;
+
+        foreach ($subs as $k => &$sub) {
+            $g = $raw[$k] * $scale;
+            $d = min($g, $difRaw[$k] * $dScale);
+            $sub['ghi'] = $g;
+            $sub['dni'] = 0.0;
+            $sub['dif'] = $d;
+            if ($g <= 0.0) {
+                continue;
+            }
+            if ($sub['cosZ'] < 0.02) {
+                $sub['dif'] = $g;                       // Sonne knapp über dem Horizont: alles diffus
+                continue;
+            }
+            $dni = ($g - $d) / $sub['cosZ'];
+            $cap = 1.15 * $this->clearSkyDni($sub['zen'], $hi['e0']);
+            if ($dni > $cap) {
+                $sub['dif'] += ($dni - $cap) * $sub['cosZ'];   // abgeschnittene Direktstrahlung → diffus
+                $dni = $cap;
+            }
+            $sub['dni'] = $dni;
+        }
+        unset($sub);
     }
 
     /** Erbs et al. (1982): Diffusanteil aus Klarheitsindex kt */
@@ -1105,19 +1283,41 @@ class OpenMeteoPV extends IPSModule
             $last = (int)array_key_last($acc);
             for ($slot = $start; $slot <= $last; $slot += $interval) {
                 $a = $acc[$slot] ?? null;
-                $values[] = ($a === null || $a[1] <= 0) ? null : round($a[0] / $a[1], 1);
+                $v = ($a === null || $a[1] <= 0) ? null : $a[0] / $a[1];
+                $values[] = ($v === null || !is_finite($v)) ? null : round($v, 1);
             }
         }
         return [
             'version'    => self::TS_VERSION,
             'source'     => $source,
             'created_ts' => $created,
-            'issued_ts'  => $issued,          // Abruf der Wetterdaten (0 = unbekannt)
+            'issued_ts'  => $issued,          // Modelllauf (MOSMIX IssueTime) bzw. Abruf; 0 = unbekannt
             'start_ts'   => $start,
             'interval_s' => $interval,
             'unit'       => 'W',
             'values'     => $values,
         ];
+    }
+
+    /** Zeitreihe bilden und schreiben; Fehler werden im Debug gemeldet, ohne die übrige Ausgabe zu stoppen */
+    private function writeTimeSeries(string $ident, array $acc, int $interval, string $source, int $created, int $issued): void
+    {
+        try {
+            $ts   = self::toTimeSeries($acc, $interval, $source, $created, $issued);
+            $json = json_encode($ts, JSON_UNESCAPED_SLASHES);
+            if ($json === false) {
+                $this->SendDebug('Zeitreihe ' . $ident, 'json_encode fehlgeschlagen: ' . json_last_error_msg(), 0);
+                return;
+            }
+            $this->SetValue($ident, $json);
+            $n = count($ts['values']);
+            $this->SendDebug('Zeitreihe ' . $ident, $n === 0
+                ? 'leer – keine Teilschritte im Zeitraum heute bis übermorgen'
+                : sprintf('%d Werte à %d s ab %s, ungültig: %d', $n, $interval, date('c', $ts['start_ts']),
+                    count(array_filter($ts['values'], fn($v) => $v === null))), 0);
+        } catch (\Throwable $e) {
+            $this->SendDebug('Zeitreihe ' . $ident . ' ERROR', $e->getMessage() . ' @' . $e->getLine(), 0);
+        }
     }
 
     /** Quellenkennung für die Zeitreihe */
